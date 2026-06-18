@@ -1,0 +1,279 @@
+# Instincts generated from https://github.com/trinhvutuandat34/Real-time-Explainable-Automatic-Target-Recognition-System
+# Generated: 2026-06-18T00:50:38.472Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: Real-time-Explainable-Automatic-Target-Recognition-System-commit-conventional
+trigger: "when writing a commit message"
+confidence: 0.85
+domain: git
+source: repo-analysis
+source_repo: https://github.com/trinhvutuandat34/Real-time-Explainable-Automatic-Target-Recognition-System
+---
+
+# Real Time Explainable Automatic Target Recognition System Commit Conventional
+
+## Action
+
+Use conventional commit format with prefixes: feat
+
+## Evidence
+
+- 1 commits analyzed
+- Detected conventional commit pattern
+- Examples: feat: scaffold REATS project — 4 modules (A detector, B classifier, C XAI, D dashboard)
+
+---
+id: Real-time-Explainable-Automatic-Target-Recognition-System-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/trinhvutuandat34/Real-time-Explainable-Automatic-Target-Recognition-System
+---
+
+# Real Time Explainable Automatic Target Recognition System Commit Length
+
+## Action
+
+Write moderate-length commit messages (~87 characters)
+
+## Evidence
+
+- Average commit message length: 87 chars
+- Based on 1 commits
+
+---
+id: Real-time-Explainable-Automatic-Target-Recognition-System-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/trinhvutuandat34/Real-time-Explainable-Automatic-Target-Recognition-System
+---
+
+# Real Time Explainable Automatic Target Recognition System Naming Files
+
+## Action
+
+Use snake_case naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: snake_case
+
+---
+id: Real-time-Explainable-Automatic-Target-Recognition-System-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/trinhvutuandat34/Real-time-Explainable-Automatic-Target-Recognition-System
+---
+
+# Real Time Explainable Automatic Target Recognition System Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: Real-time-Explainable-Automatic-Target-Recognition-System-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/trinhvutuandat34/Real-time-Explainable-Automatic-Target-Recognition-System
+---
+
+# Real Time Explainable Automatic Target Recognition System Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: reats-instinct-file-naming
+trigger: "When creating a new Python file"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: trinhvutuandat34/Real-time-Explainable-Automatic-Target-Recognition-System
+---
+
+# Reats Instinct File Naming
+
+## Action
+
+Name the file using snake_case
+
+## Evidence
+
+- Pattern in namingConventions.files
+
+---
+id: reats-instinct-function-naming
+trigger: "When defining a new function"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: trinhvutuandat34/Real-time-Explainable-Automatic-Target-Recognition-System
+---
+
+# Reats Instinct Function Naming
+
+## Action
+
+Name the function using camelCase
+
+## Evidence
+
+- Pattern in namingConventions.functions
+
+---
+id: reats-instinct-class-naming
+trigger: "When defining a new class"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: trinhvutuandat34/Real-time-Explainable-Automatic-Target-Recognition-System
+---
+
+# Reats Instinct Class Naming
+
+## Action
+
+Name the class using PascalCase
+
+## Evidence
+
+- Pattern in namingConventions.classes
+
+---
+id: reats-instinct-constant-naming
+trigger: "When defining a constant"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: trinhvutuandat34/Real-time-Explainable-Automatic-Target-Recognition-System
+---
+
+# Reats Instinct Constant Naming
+
+## Action
+
+Name the constant using SCREAMING_SNAKE_CASE
+
+## Evidence
+
+- Pattern in namingConventions.constants
+
+---
+id: reats-instinct-import-style
+trigger: "When importing modules in Python code"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: trinhvutuandat34/Real-time-Explainable-Automatic-Target-Recognition-System
+---
+
+# Reats Instinct Import Style
+
+## Action
+
+Use relative imports
+
+## Evidence
+
+- Pattern in importStyle
+
+---
+id: reats-instinct-export-style
+trigger: "When exporting symbols from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: trinhvutuandat34/Real-time-Explainable-Automatic-Target-Recognition-System
+---
+
+# Reats Instinct Export Style
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in exportStyle
+
+---
+id: reats-instinct-git-commit-format
+trigger: "When writing a git commit message"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: trinhvutuandat34/Real-time-Explainable-Automatic-Target-Recognition-System
+---
+
+# Reats Instinct Git Commit Format
+
+## Action
+
+Use the conventional commit format with a 'feat' prefix for new features
+
+## Evidence
+
+- Pattern in commits.prefixes
+- Seen in commit: feat: scaffold REATS project — 4 modules (A detector, B classifier, C XAI, D dashboard)
+
+---
+id: reats-instinct-git-commit-length
+trigger: "When composing a commit message"
+confidence: 0.7
+domain: git
+source: repo-analysis
+source_repo: trinhvutuandat34/Real-time-Explainable-Automatic-Target-Recognition-System
+---
+
+# Reats Instinct Git Commit Length
+
+## Action
+
+Write a descriptive commit message averaging around 87 characters
+
+## Evidence
+
+- Pattern in commits.averageLength
+
+---
+id: reats-instinct-test-location
+trigger: "When adding new tests"
+confidence: 0.7
+domain: testing
+source: repo-analysis
+source_repo: trinhvutuandat34/Real-time-Explainable-Automatic-Target-Recognition-System
+---
+
+# Reats Instinct Test Location
+
+## Action
+
+Place test files in mixed locations (not strictly separated from source files)
+
+## Evidence
+
+- Pattern in architecture.testLocation
+
