@@ -1,0 +1,6 @@
+interface:
+  display_name: "Real Time Explainable Automatic Target Recognition System"
+  short_description: "Repo-specific patterns and workflows for Real-time-Explainable-Automatic-Target-Recognition-System"
+  default_prompt: "Use the Real-time-Explainable-Automatic-Target-Recognition-System repo skill to follow existing architecture, testing, and workflow conventions."
+policy:
+  allow_implicit_invocation: true
