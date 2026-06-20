@@ -16,8 +16,10 @@ import random
 import shutil
 from collections import defaultdict
 from pathlib import Path
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).parent))
+from config import CLASSES
 
-CLASSES        = ["F16", "LYNX", "MiG19", "MiG21", "PKG", "PTG"]
 SPLITS         = ["train", "val", "test"]
 TARGETS        = {"train": 170, "val": 30, "test": 200}   # per class, per paper
 IMG_EXTS       = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}

@@ -1,0 +1,259 @@
+# REATS Ingestion — Label Mapping
+#
+# Maps each source dataset's raw category labels to REATS taxonomy class IDs.
+# null  → discard the annotation (background / non-military / ambiguous)
+# A class ID must match an entry in config/targets.yaml.
+#
+# Size hints guide disambiguation when a source label could mean multiple
+# things (e.g. "ship" could be a destroyer or a patrol boat).
+# size_rules: [ {max_area_px: N, class: X}, ..., {class: Y} ]  (fallback last)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FLIR Thermal Images Dataset  (COCO JSON, civilian thermal, street-level)
+# Kaggle: deepnewbie/flir-thermal-images-dataset
+# ─────────────────────────────────────────────────────────────────────────────
+FLIR_Thermal:
+  thermal: true
+  labels:
+    person:          null          # infantry — not in taxonomy
+    car:             BTR80         # small wheeled vehicle
+    bicycle:         null
+    dog:             null
+    other_vehicle:   M109          # large unclassified vehicle
+    motorcycle:      null
+    scooter:         null
+    truck:           M109
+    bus:             M109
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Teledyne FLIR ADAS Thermal Dataset v2  (COCO JSON, thermal, road-level)
+# Kaggle: teledyne-flir/thermal-dataset-adas  (or similar slug)
+# ─────────────────────────────────────────────────────────────────────────────
+FLIR_ADAS_v2:
+  thermal: true
+  labels:
+    person:          null
+    car:             BTR80
+    bicycle:         null
+    motorcycle:      null
+    bus:             M109
+    truck:           M109
+    trafficlight:    null
+    trafficsign:     null
+    other vehicle:   M109
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HIT-UAV: High-altitude Infrared Thermal  (YOLO txt, thermal, UAV top-down)
+# Kaggle: rederlan/hit-uav  (or similar)
+# Class indices: 0=Person 1=Car 2=Bicycle 3=OtherVehicle 4=DontCare
+# ─────────────────────────────────────────────────────────────────────────────
+HIT_UAV:
+  thermal: true
+  yolo_classes:
+    - Person            # idx 0
+    - Car               # idx 1
+    - Bicycle           # idx 2
+    - OtherVehicle      # idx 3
+    - DontCare          # idx 4
+  labels:
+    Person:         null
+    Car:            BTR80
+    Bicycle:        null
+    OtherVehicle:   M109
+    DontCare:       null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HRSC2016: High-Resolution Ship Collections  (XML / COCO, optical, aerial)
+# Fine-grained ship categories — best naval mapping
+# ─────────────────────────────────────────────────────────────────────────────
+HRSC2016:
+  thermal: false
+  labels:
+    # Level-1 (coarse)
+    ship:               Frigate         # generic fallback
+    # Level-2 (fine-grained, where available)
+    aircraft_carrier:   Destroyer       # largest surface combatant
+    battleship:         Destroyer
+    destroyer:          Destroyer
+    cruiser:            Destroyer
+    frigate:            Frigate
+    corvette:           Corvette
+    submarine:          null            # underwater — IR signature unreliable
+    lcs:                Corvette        # littoral combat ship
+    patrol_craft:       FastAttack
+    hovercraft:         FastAttack
+    auxiliary_ship:     null
+    container_ship:     null
+    tanker:             null
+    bulk_carrier:       null
+    cargo:              null
+    speedboat:          FastAttack
+    tugboat:            null
+    # HRSC fine class names (100xx codes mapped by name below)
+    # Parsed by HRSCLoader which normalises names before lookup.
+    "100000000":        Frigate         # fallback ship
+    "100000001":        Destroyer       # aircraft carrier
+    "100000002":        Destroyer       # warship
+    "100000003":        Frigate         # frigate
+    "100000004":        Corvette
+    "100000005":        FastAttack
+    "100000006":        null            # submarine
+    "100000007":        null            # auxiliary
+    "100000008":        null            # merchant
+    "100000009":        null            # tanker
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ship Detection from Aerial Images  (YOLO / CSV, optical, aerial)
+# ─────────────────────────────────────────────────────────────────────────────
+Ships_Aerial:
+  thermal: false
+  size_rules:
+    - max_area_px: 2000
+      class: FastAttack
+    - max_area_px: 8000
+      class: Corvette
+    - max_area_px: 20000
+      class: Frigate
+    - class: Destroyer          # largest ships
+  labels:
+    ship:  __size_rule__        # resolved by size_rules above
+    Ship:  __size_rule__
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ships in Google Earth  (YOLO / CSV, optical, satellite)
+# ─────────────────────────────────────────────────────────────────────────────
+Ships_Google_Earth:
+  thermal: false
+  size_rules:
+    - max_area_px: 1500
+      class: FastAttack
+    - max_area_px: 6000
+      class: Corvette
+    - max_area_px: 15000
+      class: Frigate
+    - class: Destroyer
+  labels:
+    ship:  __size_rule__
+    Ship:  __size_rule__
+    boat:  FastAttack
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ships/Vessels in Aerial Images  (various, optical, aerial)
+# ─────────────────────────────────────────────────────────────────────────────
+Ships_Vessels_Aerial:
+  thermal: false
+  size_rules:
+    - max_area_px: 2000
+      class: FastAttack
+    - max_area_px: 8000
+      class: Corvette
+    - max_area_px: 18000
+      class: Frigate
+    - class: Destroyer
+  labels:
+    vessel:       __size_rule__
+    ship:         __size_rule__
+    Ship:         __size_rule__
+    fishing_boat: null
+    sailboat:     null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SWIM — Ship Wake Imagery Mass  (optical, satellite/aerial)
+# ─────────────────────────────────────────────────────────────────────────────
+SWIM:
+  thermal: false
+  size_rules:
+    - max_area_px: 3000
+      class: FastAttack
+    - max_area_px: 10000
+      class: Frigate
+    - class: Destroyer
+  labels:
+    ship:  __size_rule__
+    wake:  __size_rule__    # wake implies a ship
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CGI Planes in Satellite Imagery w/ BBoxes  (optical, satellite, top-down)
+# ─────────────────────────────────────────────────────────────────────────────
+CGI_Planes:
+  thermal: false
+  size_rules:
+    # wingspan footprint: fighters small, bombers large
+    - max_area_px: 3000
+      class: MiG21          # small/fast fighter footprint
+    - max_area_px: 6000
+      class: F16
+    - max_area_px: 12000
+      class: Su27
+    - class: B52            # very large footprint = bomber
+  labels:
+    airplane: __size_rule__
+    plane:    __size_rule__
+    aircraft: __size_rule__
+    fighter:  F16
+    bomber:   B52
+    jet:      F16
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Airbus Aircraft Detection  (optical, aerial, top-down)
+# ─────────────────────────────────────────────────────────────────────────────
+Airbus_Aircraft:
+  thermal: false
+  size_rules:
+    - max_area_px: 2500
+      class: MiG21
+    - max_area_px: 5000
+      class: F16
+    - max_area_px: 10000
+      class: Su27
+    - class: B52
+  labels:
+    airplane: __size_rule__
+    aircraft: __size_rule__
+    plane:    __size_rule__
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Swimming Pool And Car Detection  (optical, aerial)
+# Only "car" annotations are useful for ground targets
+# ─────────────────────────────────────────────────────────────────────────────
+SwimmingPool_Car:
+  thermal: false
+  labels:
+    car:            BTR80
+    swimming_pool:  null
+    pool:           null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Vehicle Data Set  (optical, various views)
+# ─────────────────────────────────────────────────────────────────────────────
+Vehicle_Dataset:
+  thermal: false
+  size_rules:
+    - max_area_px: 3000
+      class: BTR80
+    - class: M109
+  labels:
+    car:          BTR80
+    truck:        M109
+    van:          BTR80
+    motorcycle:   null
+    military:     __size_rule__
+    tank:         T72
+    apc:          BMP2
+    vehicle:      __size_rule__
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Semantic Segmentation of Aerial Imagery  (optical, aerial)
+# Only vehicle/transport class pixels extracted as bboxes
+# ─────────────────────────────────────────────────────────────────────────────
+Aerial_Segmentation:
+  thermal: false
+  labels:
+    vehicle:    BTR80
+    airplane:   F16
+    ship:       Frigate
+    building:   null
+    road:       null
+    vegetation: null
+    water:      null
+    ground:     null

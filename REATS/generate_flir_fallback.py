@@ -46,37 +46,46 @@ import numpy as np
 from PIL import Image
 
 # ---------------------------------------------------------------------------
-# Constants
+# Constants — loaded from config (single source of truth)
 # ---------------------------------------------------------------------------
 
-CLASSES = ["F16", "LYNX", "MiG19", "MiG21", "PKG", "PTG"]
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).parent))
+from config import CLASSES, NUM_CLASSES
+from ingestion.preprocessor import _CLASS_THERMAL as _THERMAL
+
 SPLITS  = ["train", "val", "test"]
 TARGETS = {"train": 170, "val": 30, "test": 200}
 
 IMG_SIZE = 224  # output patch size (square)
 
-# FLIR ADAS v1 category names (lower-case)
-_FLIR_V1 = {"person", "car", "bicycle", "other_vehicle"}
-_FLIR_V2 = {"motorcycle", "bus", "truck", "scooter"}
-
-# Thermal intensity targets per REATS class (mean, std)  [0-255 8-bit]
-_THERMAL = {
-    "F16":   (205, 25),
-    "LYNX":  (178, 20),
-    "MiG19": (198, 28),
-    "MiG21": (192, 26),
-    "PKG":   (158, 18),
-    "PTG":   (152, 20),
-}
-
-# Target blob geometry (height, width) in a 224×224 patch
+# Target blob geometry (height, width) in a 224×224 patch — top-down UAV view
 _BLOB_HW = {
-    "F16":   (28, 68),
-    "LYNX":  (48, 48),
-    "MiG19": (24, 62),
-    "MiG21": (26, 56),
-    "PKG":   (42, 88),
-    "PTG":   (36, 78),
+    # AIR fighters (narrow fuselage, wide wingspan from above)
+    "F16": (20, 60), "F15": (22, 64), "F22": (24, 52), "F35": (18, 52),
+    "Su27": (24, 72), "Su35": (24, 70), "MiG29": (22, 60),
+    "MiG19": (18, 56), "MiG21": (16, 52), "J20": (24, 68),
+    # AIR bombers (large wingspan)
+    "B52": (26, 110), "Tu22M": (22, 90), "Tu95": (28, 100),
+    # AIR attack helicopters (rotor disc visible from above)
+    "AH64": (44, 52), "Mi24": (44, 54), "Ka52": (46, 50),
+    # AIR transport helicopters
+    "LYNX": (40, 48), "UH60": (44, 52), "CH47": (32, 78),
+    # AIR UAVs (small, narrow)
+    "MQ9": (18, 50), "TB2": (22, 50), "Shahed136": (14, 36),
+    "RQ4": (28, 78), "WZ7": (22, 54),
+    # GROUND MBT (boxy from above)
+    "M1Abrams": (26, 42), "T72": (22, 36), "T90": (24, 38), "Leopard2": (24, 38),
+    # GROUND IFV/APC (smaller)
+    "BMP2": (18, 32), "Bradley": (18, 32), "BTR80": (16, 28), "K21": (18, 32),
+    # GROUND artillery
+    "M109": (18, 36), "BM21": (16, 48),
+    # GROUND air defense
+    "Patriot": (14, 26), "Buk": (16, 28), "Pantsir": (16, 26),
+    # NAVAL (elongated hull, top-down)
+    "PKG": (26, 88), "PTG": (22, 78), "FastAttack": (20, 68),
+    "Destroyer": (30, 150), "Frigate": (26, 120), "Corvette": (24, 96),
 }
 
 # ---------------------------------------------------------------------------
@@ -99,26 +108,17 @@ _MEDIUM_AREA = 64 * 64
 
 
 def _flir_category_to_reats(cat_name: str, bbox_area: float) -> str | None:
-    """Return REATS class or None if unmappable."""
+    """Map FLIR ADAS civilian categories to the nearest REATS military class."""
     cat = cat_name.lower().strip()
+    # Ground vehicles — map to wheeled/tracked vehicle classes by size
+    if cat in ("car",):
+        return "BTR80"                     # small wheeled vehicle
+    if cat in ("truck", "bus", "other_vehicle", "van"):
+        return "M109"                      # large ground vehicle
+    if cat in ("motorcycle", "scooter", "bicycle"):
+        return None                        # no good military equivalent
     if cat == "person":
-        return "LYNX"
-    if cat == "bicycle":
-        if bbox_area < _SMALL_AREA:
-            return "MiG21"
-        if bbox_area < _MEDIUM_AREA:
-            return "MiG21"
-        return "F16"
-    if cat == "car":
-        if bbox_area < _SMALL_AREA:
-            return "MiG19"
-        if bbox_area < _MEDIUM_AREA:
-            return "PTG"
-        return "PKG"
-    if cat in ("other_vehicle", "truck", "bus"):
-        return "PKG"
-    if cat in ("motorcycle", "scooter"):
-        return "MiG21"
+        return None                        # not in taxonomy
     return None
 
 
