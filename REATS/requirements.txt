@@ -18,6 +18,14 @@ captum>=0.7.0
 streamlit>=1.30.0
 gradio>=4.0.0
 
+# iPhone live-feed streamer — Module E
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+websockets>=11.0
+pyngrok>=6.0.0
+qrcode[pil]>=7.4.0
+requests>=2.31.0
+
 # Experiment Tracking
 mlflow>=2.10.0
 
