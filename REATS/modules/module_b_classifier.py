@@ -47,6 +47,22 @@ CONFIG = {
 # Augmentation
 # ---------------------------------------------------------------------------
 
+class _NormalizedEqualize(nn.Module):
+    """RandomEqualize for tensors normalized with mean=0.5, std=0.5.
+    Kornia's equalize requires [0,1] input, so we denorm→equalize→renorm."""
+    def __init__(self, p: float = 0.5):
+        super().__init__()
+        self.p = p
+        self._eq = K.RandomEqualize(p=1.0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if torch.rand(1).item() > self.p:
+            return x
+        x01 = (x * 0.5 + 0.5).clamp(0.0, 1.0)
+        x01 = self._eq(x01)
+        return (x01 - 0.5) / 0.5
+
+
 class KorniaAugmentPipeline(nn.Module):
     """IR augmentation from Table 1 of the paper — each transform p=0.5."""
     def __init__(self):
@@ -60,7 +76,7 @@ class KorniaAugmentPipeline(nn.Module):
             K.RandomPerspective(distortion_scale=0.3, p=0.5),
             K.RandomBrightness(brightness=(0.7, 1.3), p=0.5),
             K.RandomContrast(contrast=(0.7, 1.3), p=0.5),
-            K.RandomEqualize(p=0.5),
+            _NormalizedEqualize(p=0.5),
             K.RandomGaussianNoise(mean=0.0, std=0.05, p=0.5),
         )
 
