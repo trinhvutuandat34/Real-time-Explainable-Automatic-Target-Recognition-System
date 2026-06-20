@@ -230,6 +230,57 @@ def _blend_heatmap(roi_bgr: np.ndarray, heatmap: np.ndarray, opacity: float) -> 
     return cv2.addWeighted(roi_bgr, 1 - opacity, hm, opacity, 0)
 
 
+def _eigen_cam(
+    classifier,
+    tensor: torch.Tensor,
+    target_idx: int,
+    out_shape: tuple,
+) -> np.ndarray | None:
+    """
+    Gradient-free EigenCAM: PCA of last Conv2d feature maps.
+    ~5-10x faster than Grad-CAM — suitable for real-time use at ≥15 FPS.
+    Returns BGR uint8 heatmap (H, W, 3) or None on failure.
+    """
+    try:
+        model = classifier.models[0] if hasattr(classifier, "models") else classifier
+        acts: list = []
+
+        def _fwd(m, inp, out):   # type: ignore[override]
+            acts.append(out.detach())
+
+        target_layer = None
+        for layer in model.modules():
+            if isinstance(layer, torch.nn.Conv2d):
+                target_layer = layer
+        if target_layer is None:
+            return None
+
+        fh = target_layer.register_forward_hook(_fwd)
+        with torch.no_grad():
+            model(tensor)
+        fh.remove()
+
+        if not acts:
+            return None
+
+        feat = acts[0].squeeze(0).numpy()        # (C, H, W)
+        C, H, W = feat.shape
+        flat = feat.reshape(C, -1).T             # (H*W, C)
+
+        flat -= flat.mean(axis=0, keepdims=True)
+        _, _, Vt = np.linalg.svd(flat, full_matrices=False)
+        cam = (flat @ Vt[0]).reshape(H, W)
+        cam = np.maximum(cam, 0)
+        if cam.max() > 0:
+            cam /= cam.max()
+
+        cam_up = cv2.resize(cam, (out_shape[1], out_shape[0]))
+        return cv2.applyColorMap((cam_up * 255).astype(np.uint8), cv2.COLORMAP_JET)
+
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Helper: frame bytes → RGB array
 # ---------------------------------------------------------------------------
@@ -742,6 +793,219 @@ Module D — Operator Dashboard (this UI)
 
 
 # ---------------------------------------------------------------------------
+# Tab 5 — iPhone Live Feed
+# ---------------------------------------------------------------------------
+
+def _tab_live_feed(conf_thresh: float, iou_thresh: float, hm_opacity: float) -> None:
+    """iPhone live-feed tab: poll module_e_streamer, run pipeline, show heatmap."""
+    import requests
+
+    st.subheader("📱 iPhone Live Feed")
+
+    # ── Streamer URL config ──────────────────────────────────────────────────
+    col_url, col_xai = st.columns([3, 1])
+    with col_url:
+        streamer_url = st.text_input(
+            "Streamer URL",
+            value=st.session_state.get("streamer_url", "http://localhost:7860"),
+            help="Base URL of module_e_streamer.py  (e.g. http://localhost:7860 or an ngrok URL)",
+        ).rstrip("/")
+        st.session_state["streamer_url"] = streamer_url
+    with col_xai:
+        xai_mode = st.selectbox(
+            "XAI overlay",
+            ["Off", "EigenCAM (~3 ms)", "Grad-CAM (~30 ms)"],
+            index=1,
+        )
+
+    # ── QR code for easy iPhone access ──────────────────────────────────────
+    with st.expander("📷 QR code — open on iPhone", expanded=False):
+        try:
+            import qrcode  # type: ignore
+            qr_img = qrcode.make(streamer_url)
+            st.image(qr_img, width=200,
+                     caption=f"Scan with iPhone camera → {streamer_url}")
+        except ImportError:
+            st.info("Install qrcode for QR display:  `pip install qrcode[pil]`")
+        st.code(f"python modules/module_e_streamer.py --ngrok", language="bash")
+
+    # ── Streamer status ──────────────────────────────────────────────────────
+    status_ph = st.empty()
+    try:
+        r = requests.get(f"{streamer_url}/status", timeout=1.5)
+        if r.ok:
+            s = r.json()
+            if s.get("streaming"):
+                status_ph.success(
+                    f"📡 Streaming — {s['clients']} client(s), "
+                    f"{s['frame_count']} frames, age {s['frame_age_s']:.2f}s"
+                )
+            else:
+                status_ph.warning("⏳ Streamer reachable — waiting for iPhone to connect")
+        else:
+            status_ph.error("Streamer returned an error.")
+    except Exception:
+        status_ph.error(
+            f"Cannot reach streamer at **{streamer_url}**. "
+            "Start it with: `python modules/module_e_streamer.py --ngrok`"
+        )
+        return
+
+    st.divider()
+
+    # ── Live loop ────────────────────────────────────────────────────────────
+    frame_ph  = st.empty()
+    detect_ph = st.empty()
+    metric_ph = st.empty()
+
+    if not st.session_state.get("live_running", False):
+        if st.button("▶ Start live feed", type="primary"):
+            st.session_state["live_running"] = True
+            st.rerun()
+        return
+
+    if st.button("⏹ Stop"):
+        st.session_state["live_running"] = False
+        st.rerun()
+
+    # ── One frame cycle ──────────────────────────────────────────────────────
+    t0 = time.perf_counter()
+
+    try:
+        resp = requests.get(f"{streamer_url}/frame", timeout=1.5)
+    except Exception:
+        frame_ph.warning("Lost connection to streamer — retrying…")
+        time.sleep(0.5)
+        st.rerun()
+        return
+
+    if resp.status_code == 204:
+        frame_ph.info("⏳ No frames yet — open the streamer URL on your iPhone.")
+        time.sleep(0.3)
+        st.rerun()
+        return
+
+    # Decode JPEG
+    arr = np.frombuffer(resp.content, dtype=np.uint8)
+    frame_bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if frame_bgr is None:
+        time.sleep(0.2)
+        st.rerun()
+        return
+
+    # Load models (uses the same pipeline loaded via the sidebar "Load Models" button)
+    pipeline = st.session_state.get("pipeline")
+    if pipeline is not None:
+        detector, classifier, _ = pipeline
+    else:
+        detector = classifier = None
+
+    annotated = frame_bgr.copy()
+    det_cards: list[dict] = []
+
+    if detector is not None and classifier is not None:
+        try:
+            detections = detector.detect(frame_bgr, conf_thresh=conf_thresh, iou_thresh=iou_thresh)
+        except Exception:
+            detections = []
+
+        for det in detections:
+            x1, y1, x2, y2 = (int(v) for v in det["bbox"])
+            roi = frame_bgr[y1:y2, x1:x2]
+            if roi.size == 0:
+                continue
+
+            # Classify ROI
+            try:
+                from modules.module_b_classifier import preprocess_roi
+                tensor = preprocess_roi(roi)
+                with torch.no_grad():
+                    probs = classifier(tensor).softmax(-1).squeeze(0).cpu().numpy()
+                top_idx   = int(probs.argmax())
+                top_conf  = float(probs[top_idx])
+                top_class = CLASSES[top_idx] if top_idx < len(CLASSES) else str(top_idx)
+                meta      = TARGET_META.get(top_class, {})
+            except Exception:
+                top_idx = 0; top_conf = 0.0; top_class = "unknown"; meta = {}
+
+            # XAI overlay
+            heatmap = None
+            if xai_mode.startswith("EigenCAM"):
+                try:
+                    from modules.module_b_classifier import preprocess_roi
+                    t = preprocess_roi(roi)
+                    heatmap = _eigen_cam(classifier, t, top_idx, roi.shape[:2])
+                except Exception:
+                    pass
+            elif xai_mode.startswith("Grad-CAM"):
+                try:
+                    from modules.module_c_xai import GradCAMExplainer
+                    t = preprocess_roi(roi)   # type: ignore[assignment]
+                    model = classifier.models[0] if hasattr(classifier, "models") else classifier
+                    exp = GradCAMExplainer(model)
+                    heatmap = exp.explain(t, target_class=top_idx, roi_shape=roi.shape[:2])
+                except Exception:
+                    pass
+
+            # Draw on annotated frame
+            threat = meta.get("threat_level", "YELLOW")
+            color  = THREAT_COLOR_BGR.get(threat, (0, 200, 200))
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+            label = f"{top_class} {top_conf:.0%}"
+            cv2.putText(annotated, label, (x1, max(y1 - 6, 12)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
+
+            if heatmap is not None:
+                blended = _blend_heatmap(roi, heatmap, hm_opacity)
+                annotated[y1:y2, x1:x2] = blended
+
+            det_cards.append({
+                "class": top_class,
+                "conf":  top_conf,
+                "threat": threat,
+                "name":  meta.get("name", top_class),
+                "domain": meta.get("domain", ""),
+            })
+
+    latency_ms = (time.perf_counter() - t0) * 1000
+
+    # ── Display ──────────────────────────────────────────────────────────────
+    frame_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+    frame_ph.image(frame_rgb, use_container_width=True)
+
+    # Threat banner
+    if det_cards:
+        threats = {c["threat"] for c in det_cards}
+        if "RED" in threats:
+            detect_ph.error("🔴 RED THREAT DETECTED")
+        elif "ORANGE" in threats:
+            detect_ph.warning("🟠 Orange threat detected")
+        else:
+            detect_ph.success("🟡 Target(s) identified")
+
+        for c in det_cards:
+            icon = THREAT_ICONS.get(c["threat"], "⚪")
+            st.markdown(
+                f"{icon} **{c['class']}** — {c['name']}  "
+                f"(*{c['domain']}*) — conf {c['conf']:.1%}"
+            )
+    else:
+        detect_ph.info("No detections in this frame.")
+
+    # Metrics row
+    lat_ok = "✅" if latency_ms < 40 else "⚠️"
+    metric_ph.caption(
+        f"{lat_ok} Latency {latency_ms:.1f} ms / target ≤40 ms  |  "
+        f"XAI: {xai_mode}  |  "
+        f"Detections: {len(det_cards)}"
+    )
+
+    # Loop at ~15 FPS
+    time.sleep(max(0.0, 0.067 - latency_ms / 1000))
+    st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -755,8 +1019,8 @@ def main():
 
     det_w, cls_w, conf_thresh, iou_thresh, xai_enabled, hm_opacity, mc_dropout = _render_sidebar()
 
-    tab1, tab2, tab3, tab4 = st.tabs(
-        ["🎯 Live Analysis", "📦 Batch Processing", "📊 Calibration", "ℹ️ About"]
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["🎯 Live Analysis", "📦 Batch Processing", "📊 Calibration", "ℹ️ About", "📱 iPhone Live"]
     )
 
     with tab1:
@@ -770,6 +1034,9 @@ def main():
 
     with tab4:
         _tab_about()
+
+    with tab5:
+        _tab_live_feed(conf_thresh, iou_thresh, hm_opacity)
 
 
 if __name__ == "__main__":
