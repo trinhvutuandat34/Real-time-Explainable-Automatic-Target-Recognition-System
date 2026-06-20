@@ -1,0 +1,66 @@
+version: "3.9"
+
+# REATS — Real-time Explainable Automatic Target Recognition System
+#
+# Quick start:
+#   docker compose up --build
+#
+# Then open:
+#   http://localhost:8501  — Streamlit dashboard
+#   http://localhost:7860  — iPhone camera capture page
+#                            (or run with ngrok: see streamer service below)
+#
+# To add GPU support, uncomment the "deploy" blocks (requires nvidia-container-toolkit).
+
+services:
+
+  # ── Streamlit dashboard (Modules A–D) ────────────────────────────────────
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: reats:latest
+    container_name: reats_dashboard
+    command: >
+      streamlit run REATS/modules/module_d_dashboard.py
+      --server.port=8501
+      --server.address=0.0.0.0
+      --server.headless=true
+      --server.fileWatcherType=none
+    ports:
+      - "8501:8501"
+    volumes:
+      # Mount checkpoints and data so they survive container restarts
+      - ./REATS/checkpoints:/app/REATS/checkpoints
+      - ./REATS/data:/app/REATS/data
+      - ./REATS/runs:/app/REATS/runs
+    environment:
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+      # URL where dashboard polls the streamer (host.docker.internal on Mac/Windows;
+      # use the service name on Linux Docker networks)
+      - REATS_STREAMER_URL=http://streamer:7860
+    depends_on:
+      - streamer
+    restart: unless-stopped
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # ── iPhone camera streamer (Module E) ────────────────────────────────────
+  streamer:
+    image: reats:latest          # reuses the same image built above
+    container_name: reats_streamer
+    command: >
+      python REATS/modules/module_e_streamer.py
+      --host 0.0.0.0
+      --port 7860
+    ports:
+      - "7860:7860"
+    restart: unless-stopped
+    # To expose with ngrok (HTTPS — required for iOS getUserMedia):
+    #   docker compose run --rm streamer \
+    #     python REATS/modules/module_e_streamer.py --ngrok --port 7860
