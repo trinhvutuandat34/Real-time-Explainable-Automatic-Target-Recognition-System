@@ -158,7 +158,7 @@ class SPP(nn.Module):
         self.post = nn.Sequential(
             CBL(mid * 4, in_c, 1),
             CBL(in_c, out_c, 3),
-            CBL(out_c, out_c // 2, 1),
+            CBL(out_c, out_c, 1),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -684,8 +684,16 @@ class IRDetector:
         state = ckpt.get("model_state", ckpt)
         self.model.load_state_dict(state)
 
-    def detect(self, frame: np.ndarray) -> List[dict]:
+    def detect(
+        self,
+        frame: np.ndarray,
+        conf_thresh: Optional[float] = None,
+        iou_thresh:  Optional[float] = None,
+    ) -> List[dict]:
         """Run full pipeline on a single frame (H,W,C) uint8. Returns [{bbox,conf,class_id,class_name}]."""
+        conf = conf_thresh if conf_thresh is not None else self.conf
+        iou  = iou_thresh  if iou_thresh  is not None else self.iou
+
         h, w = frame.shape[:2]
         inp  = cv2.resize(frame, (640, 640))
         if inp.ndim == 2:
@@ -697,7 +705,7 @@ class IRDetector:
 
         with torch.no_grad():
             preds = self.model(t)   # [(1, N, 5+C)]
-        dets = non_max_suppression([preds[0][0]], self.conf, self.iou)[0]
+        dets = non_max_suppression([preds[0][0]], conf, iou)[0]
 
         results = []
         if dets is None:
