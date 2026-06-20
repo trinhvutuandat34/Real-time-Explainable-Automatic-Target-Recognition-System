@@ -22,11 +22,16 @@ import kornia.augmentation as K
 import mlflow
 from sklearn.metrics import precision_recall_fscore_support
 
-CLASSES = ["F16", "LYNX", "MiG19", "MiG21", "PKG", "PTG"]
+import sys as _sys
+from pathlib import Path as _Path
+_reats_root = str(_Path(__file__).parent.parent)
+if _reats_root not in _sys.path:
+    _sys.path.insert(0, _reats_root)
+from config import CLASSES, NUM_CLASSES
 
 CONFIG = {
     "data_root":        "data/",
-    "num_classes":      6,
+    "num_classes":      NUM_CLASSES,
     "img_size":         224,
     "batch_size":       128,
     "lr":               1e-4,
@@ -88,7 +93,7 @@ class KorniaAugmentPipeline(nn.Module):
 # Model builders
 # ---------------------------------------------------------------------------
 
-def build_convnext(num_classes: int = 6, pretrained: bool = True) -> nn.Module:
+def build_convnext(num_classes: int = NUM_CLASSES, pretrained: bool = True) -> nn.Module:
     """ConvNeXt_tiny with ImageNet weights; final Linear replaced for num_classes."""
     weights = models.ConvNeXt_Tiny_Weights.IMAGENET1K_V1 if pretrained else None
     model   = models.convnext_tiny(weights=weights)
@@ -465,7 +470,7 @@ def train_ensemble(
 
 def load_ensemble(
     ckpt_paths: List[str],
-    num_classes: int = 6,
+    num_classes: int = NUM_CLASSES,
     device: str = "cpu",
 ) -> EnsembleClassifier:
     """Load N checkpoints into EnsembleClassifier."""
