@@ -1,6 +1,7 @@
 """MODULE D — Operator Dashboard (production-grade Streamlit UI for REATS)."""
 
 import io
+import sys
 import time
 import zipfile
 import csv
@@ -13,22 +14,17 @@ from pathlib import Path
 from PIL import Image
 
 # ---------------------------------------------------------------------------
-# Constants
+# Config — single source of truth loaded from REATS/config/targets.yaml
 # ---------------------------------------------------------------------------
 
-CLASSES = ["F16", "LYNX", "MiG19", "MiG21", "PKG", "PTG"]
+_reats_root = str(Path(__file__).parent.parent)
+if _reats_root not in sys.path:
+    sys.path.insert(0, _reats_root)
 
-THREAT_COLOR_BGR = {
-    "F16":   (0,   0,   255),
-    "MiG19": (0,   0,   255),
-    "MiG21": (0,   0,   255),
-    "LYNX":  (0,   165, 255),
-    "PKG":   (0,   0,   255),
-    "PTG":   (0,   0,   255),
-}
-
-RED_THREATS    = {"F16", "MiG19", "MiG21", "PKG", "PTG"}
-ORANGE_THREATS = {"LYNX"}
+from config import (
+    CLASSES, NUM_CLASSES, TARGET_META,
+    THREAT_COLOR_BGR, RED_THREATS, ORANGE_THREATS, YELLOW_THREATS,
+)
 
 METRIC_TARGETS = {
     "Accuracy": ("≥ 92%", 0.92),
@@ -375,15 +371,29 @@ def _tab_live(conf_thresh, iou_thresh, xai_enabled, hm_opacity, mc_dropout):
 
         # Per-detection cards
         for i, det in enumerate(output["detections"]):
-            with st.expander(f"Target {i+1}: {det['class']} ({det['confidence']:.0%})", expanded=True):
+            meta = TARGET_META.get(det["class"], {})
+            domain   = meta.get("domain", "")
+            category = meta.get("category", "")
+            label = f"Target {i+1}: {det['class']} ({det['confidence']:.0%})"
+            if domain:
+                label += f"  [{domain} / {category}]"
+            with st.expander(label, expanded=True):
                 c1, c2 = st.columns(2)
                 c1.metric("Class", det["class"])
+                c1.metric("Full name", meta.get("name", det["class"]))
                 c1.metric("Confidence", f"{det['confidence']:.1%}")
-                c2.bar_chart(det["probs"])
+                c1.metric("Domain", domain or "—")
+                c1.metric("Category", category or "—")
+                # Show top-5 classes by probability
+                top5 = dict(
+                    sorted(det["probs"].items(), key=lambda kv: kv[1], reverse=True)[:5]
+                )
+                c2.caption(f"Top-5 of {NUM_CLASSES} classes")
+                c2.bar_chart(top5)
 
                 if mc_dropout and det["uncertainty"] is not None:
                     ent = det["uncertainty"]["entropy"]
-                    max_ent = np.log(len(CLASSES))
+                    max_ent = np.log(NUM_CLASSES)
                     norm_ent = min(ent / max_ent, 1.0)
                     st.progress(norm_ent, text=f"Uncertainty entropy: {ent:.3f}")
                     if ent > 0.5:
@@ -529,9 +539,11 @@ def _tab_calibration():
     st.subheader("Model Calibration")
     pipeline = st.session_state.get("pipeline")
 
+    example_classes = ", ".join(f"`{c}`" for c in CLASSES[:4])
     st.markdown(
-        "Upload a **ZIP** containing class sub-folders of images "
-        "(e.g. `test_set.zip/F16/*.jpg`, `test_set.zip/MiG21/*.png`, …)."
+        f"Upload a **ZIP** containing class sub-folders of images "
+        f"(e.g. `test_set.zip/{CLASSES[0]}/*.jpg`, `test_set.zip/{CLASSES[1]}/*.png`, …). "
+        f"Recognised classes: {example_classes} … ({NUM_CLASSES} total)."
     )
     zip_file = st.file_uploader("Upload test-set ZIP", type=["zip"], key="cal_upload")
 
@@ -651,41 +663,65 @@ def _tab_calibration():
 def _tab_about():
     st.subheader("REATS — Real-time Explainable Automatic Target Recognition System")
     st.markdown(
-        """
+        f"""
 **Architecture overview**
 
 ```
 IR Frame
    │
    ▼
-Module A — YOLOv8-based IR Detector
-   │  bounding boxes + crops
+Module A — YOLOv4 IR Detector  (CSPDarknet53 + SPP + PANet)
+   │  bounding boxes + ROI crops
    ▼
-Module B — ConvNeXt Ensemble Classifier  (6 classes)
-   │  class probabilities
+Module B — ConvNeXt Ensemble Classifier  ({NUM_CLASSES} classes, 6-model ensemble)
+   │  class probabilities + top-5 display
    ▼
-Module C — XAI (Grad-CAM)  +  MC Dropout Uncertainty
-   │
+Module C — XAI (Grad-CAM / GradCAM++ / EigenCAM)  +  MC Dropout Uncertainty
+   │  heatmaps, entropy, faithfulness AUC
    ▼
 Module D — Operator Dashboard (this UI)
 ```
 
-**Target classes:** F16, LYNX, MiG19, MiG21, PKG, PTG
+**Taxonomy** — {NUM_CLASSES} targets loaded from `config/targets.yaml`
+(edit that file to add new classes; all modules pick them up automatically)
+        """
+    )
 
+    # Build dynamic class listing grouped by domain
+    DOMAIN_ICONS = {"AIR": "✈️", "GROUND": "🚗", "NAVAL": "🚢"}
+    THREAT_ICONS = {"RED": "🔴", "ORANGE": "🟠", "YELLOW": "🟡"}
+
+    domains: dict = {}
+    for cls in CLASSES:
+        meta   = TARGET_META[cls]
+        domain = meta.get("domain", "OTHER")
+        domains.setdefault(domain, []).append(meta)
+
+    for domain, targets in domains.items():
+        icon = DOMAIN_ICONS.get(domain, "📦")
+        with st.expander(f"{icon} {domain} — {len(targets)} classes", expanded=False):
+            for t in targets:
+                lvl  = t.get("threat_level", "YELLOW")
+                ticon = THREAT_ICONS.get(lvl, "⚪")
+                cat  = t.get("category", "")
+                st.markdown(f"{ticon} **`{t['id']}`** — {t['name']}  *(category: {cat})*")
+
+    st.divider()
+    st.markdown(
+        """
 **Threat levels**
-- 🔴 RED — F16, MiG19, MiG21, PKG, PTG
-- 🟠 ORANGE — LYNX
+- 🔴 RED — high-threat combat platforms (fighters, attack helicopters, armed UAVs, armed vessels)
+- 🟠 ORANGE — surveillance / transport platforms (ISR UAVs, utility helicopters)
+- 🟡 YELLOW — lower-threat or friendly-like platforms (air defense, cargo vessels)
 
 **Citation**
 ```
-@misc{reats2024,
-  title  = {REATS: Real-time Explainable Automatic Target Recognition},
-  year   = {2024},
-  note   = {GitHub placeholder}
+@misc{reats2025,
+  title  = {REATS: Real-time Explainable Automatic Target Recognition System},
+  year   = {2025},
+  note   = {Do et al., JKSCI Vol.30 No.1}
 }
 ```
-
-**GitHub:** [https://github.com/your-org/REATS](https://github.com/your-org/REATS)
         """
     )
 
@@ -713,8 +749,8 @@ def main():
     st.set_page_config(page_title="REATS Dashboard", layout="wide", page_icon="🎯")
     st.title("🎯 REATS — Real-time Explainable ATR")
     st.caption(
-        "IR Frame → Module A (YOLOv8 detector) → Module B (ConvNeXt ensemble) "
-        "→ Module C (XAI/uncertainty) → Module D (this dashboard)"
+        f"IR Frame → Module A (YOLOv4 detector) → Module B (ConvNeXt {NUM_CLASSES}-class ensemble) "
+        "→ Module C (Grad-CAM XAI + MC Dropout uncertainty) → Module D (this dashboard)"
     )
 
     det_w, cls_w, conf_thresh, iou_thresh, xai_enabled, hm_opacity, mc_dropout = _render_sidebar()

@@ -1,0 +1,350 @@
+# REATS Target Taxonomy
+# Single source of truth — add new targets here; all modules pick them up automatically.
+# Fields: id, name, domain, category, threat_level (RED|ORANGE|YELLOW), color_bgr
+
+classes:
+
+  # ============================================================
+  # AIR — Fixed-wing fighters
+  # ============================================================
+
+  - id: F16
+    name: "F-16 Fighting Falcon"
+    domain: AIR
+    category: fighter
+    threat_level: RED
+    color_bgr: [0, 0, 255]
+
+  - id: F15
+    name: "F-15 Eagle"
+    domain: AIR
+    category: fighter
+    threat_level: RED
+    color_bgr: [0, 0, 255]
+
+  - id: F22
+    name: "F-22 Raptor"
+    domain: AIR
+    category: fighter
+    threat_level: RED
+    color_bgr: [0, 0, 255]
+
+  - id: F35
+    name: "F-35 Lightning II"
+    domain: AIR
+    category: fighter
+    threat_level: RED
+    color_bgr: [0, 0, 255]
+
+  - id: Su27
+    name: "Su-27 Flanker"
+    domain: AIR
+    category: fighter
+    threat_level: RED
+    color_bgr: [0, 0, 255]
+
+  - id: Su35
+    name: "Su-35 Flanker-E"
+    domain: AIR
+    category: fighter
+    threat_level: RED
+    color_bgr: [0, 0, 255]
+
+  - id: MiG29
+    name: "MiG-29 Fulcrum"
+    domain: AIR
+    category: fighter
+    threat_level: RED
+    color_bgr: [0, 0, 255]
+
+  - id: MiG19
+    name: "MiG-19 Farmer"
+    domain: AIR
+    category: fighter
+    threat_level: RED
+    color_bgr: [0, 0, 255]
+
+  - id: MiG21
+    name: "MiG-21 Fishbed"
+    domain: AIR
+    category: fighter
+    threat_level: RED
+    color_bgr: [0, 0, 255]
+
+  - id: J20
+    name: "J-20 Mighty Dragon"
+    domain: AIR
+    category: fighter
+    threat_level: RED
+    color_bgr: [0, 0, 255]
+
+  # ============================================================
+  # AIR — Bombers / strategic strike
+  # ============================================================
+
+  - id: B52
+    name: "B-52 Stratofortress"
+    domain: AIR
+    category: bomber
+    threat_level: RED
+    color_bgr: [0, 0, 200]
+
+  - id: Tu22M
+    name: "Tu-22M Backfire"
+    domain: AIR
+    category: bomber
+    threat_level: RED
+    color_bgr: [0, 0, 200]
+
+  - id: Tu95
+    name: "Tu-95 Bear"
+    domain: AIR
+    category: bomber
+    threat_level: RED
+    color_bgr: [0, 0, 200]
+
+  # ============================================================
+  # AIR — Attack helicopters
+  # ============================================================
+
+  - id: AH64
+    name: "AH-64 Apache"
+    domain: AIR
+    category: attack_helicopter
+    threat_level: RED
+    color_bgr: [0, 40, 255]
+
+  - id: Mi24
+    name: "Mi-24 Hind"
+    domain: AIR
+    category: attack_helicopter
+    threat_level: RED
+    color_bgr: [0, 40, 255]
+
+  - id: Ka52
+    name: "Ka-52 Alligator"
+    domain: AIR
+    category: attack_helicopter
+    threat_level: RED
+    color_bgr: [0, 40, 255]
+
+  # ============================================================
+  # AIR — Transport / utility helicopters
+  # ============================================================
+
+  - id: LYNX
+    name: "Westland Lynx"
+    domain: AIR
+    category: utility_helicopter
+    threat_level: ORANGE
+    color_bgr: [0, 165, 255]
+
+  - id: UH60
+    name: "UH-60 Black Hawk"
+    domain: AIR
+    category: utility_helicopter
+    threat_level: ORANGE
+    color_bgr: [0, 165, 255]
+
+  - id: CH47
+    name: "CH-47 Chinook"
+    domain: AIR
+    category: utility_helicopter
+    threat_level: ORANGE
+    color_bgr: [0, 165, 255]
+
+  # ============================================================
+  # AIR — UAV / Loitering munitions
+  # ============================================================
+
+  - id: MQ9
+    name: "MQ-9 Reaper"
+    domain: AIR
+    category: uav
+    threat_level: RED
+    color_bgr: [0, 20, 240]
+
+  - id: TB2
+    name: "Bayraktar TB2"
+    domain: AIR
+    category: uav
+    threat_level: RED
+    color_bgr: [0, 20, 240]
+
+  - id: Shahed136
+    name: "Shahed-136 Loitering Munition"
+    domain: AIR
+    category: uav_loitering
+    threat_level: RED
+    color_bgr: [0, 20, 240]
+
+  - id: RQ4
+    name: "RQ-4 Global Hawk"
+    domain: AIR
+    category: uav_isr
+    threat_level: ORANGE
+    color_bgr: [0, 140, 255]
+
+  - id: WZ7
+    name: "WZ-7 Soaring Dragon"
+    domain: AIR
+    category: uav_isr
+    threat_level: ORANGE
+    color_bgr: [0, 140, 255]
+
+  # ============================================================
+  # GROUND — Main Battle Tanks
+  # ============================================================
+
+  - id: M1Abrams
+    name: "M1 Abrams"
+    domain: GROUND
+    category: mbt
+    threat_level: RED
+    color_bgr: [30, 0, 220]
+
+  - id: T72
+    name: "T-72"
+    domain: GROUND
+    category: mbt
+    threat_level: RED
+    color_bgr: [30, 0, 220]
+
+  - id: T90
+    name: "T-90"
+    domain: GROUND
+    category: mbt
+    threat_level: RED
+    color_bgr: [30, 0, 220]
+
+  - id: Leopard2
+    name: "Leopard 2"
+    domain: GROUND
+    category: mbt
+    threat_level: RED
+    color_bgr: [30, 0, 220]
+
+  # ============================================================
+  # GROUND — IFV / APC
+  # ============================================================
+
+  - id: BMP2
+    name: "BMP-2"
+    domain: GROUND
+    category: ifv
+    threat_level: RED
+    color_bgr: [60, 0, 200]
+
+  - id: Bradley
+    name: "M2 Bradley"
+    domain: GROUND
+    category: ifv
+    threat_level: RED
+    color_bgr: [60, 0, 200]
+
+  - id: BTR80
+    name: "BTR-80"
+    domain: GROUND
+    category: apc
+    threat_level: ORANGE
+    color_bgr: [0, 120, 255]
+
+  - id: K21
+    name: "K21 IFV"
+    domain: GROUND
+    category: ifv
+    threat_level: RED
+    color_bgr: [60, 0, 200]
+
+  # ============================================================
+  # GROUND — Artillery / rocket systems
+  # ============================================================
+
+  - id: M109
+    name: "M109 Paladin SPH"
+    domain: GROUND
+    category: artillery
+    threat_level: RED
+    color_bgr: [0, 0, 180]
+
+  - id: BM21
+    name: "BM-21 Grad MLRS"
+    domain: GROUND
+    category: mlrs
+    threat_level: RED
+    color_bgr: [0, 0, 180]
+
+  # ============================================================
+  # GROUND — Air defense systems
+  # ============================================================
+
+  - id: Patriot
+    name: "MIM-104 Patriot"
+    domain: GROUND
+    category: air_defense
+    threat_level: YELLOW
+    color_bgr: [0, 220, 220]
+
+  - id: Buk
+    name: "Buk-M2 SAM"
+    domain: GROUND
+    category: air_defense
+    threat_level: RED
+    color_bgr: [0, 0, 200]
+
+  - id: Pantsir
+    name: "Pantsir-S1"
+    domain: GROUND
+    category: air_defense
+    threat_level: RED
+    color_bgr: [0, 0, 200]
+
+  # ============================================================
+  # NAVAL — Patrol / fast attack
+  # ============================================================
+
+  - id: PKG
+    name: "PKG Patrol Gunboat"
+    domain: NAVAL
+    category: patrol_boat
+    threat_level: RED
+    color_bgr: [0, 0, 255]
+
+  - id: PTG
+    name: "PTG Patrol Torpedo Gunboat"
+    domain: NAVAL
+    category: patrol_boat
+    threat_level: RED
+    color_bgr: [0, 0, 255]
+
+  - id: FastAttack
+    name: "Fast Attack Craft"
+    domain: NAVAL
+    category: fast_attack
+    threat_level: RED
+    color_bgr: [0, 0, 255]
+
+  # ============================================================
+  # NAVAL — Surface combatants
+  # ============================================================
+
+  - id: Destroyer
+    name: "Destroyer"
+    domain: NAVAL
+    category: surface_combatant
+    threat_level: RED
+    color_bgr: [0, 0, 210]
+
+  - id: Frigate
+    name: "Frigate"
+    domain: NAVAL
+    category: surface_combatant
+    threat_level: RED
+    color_bgr: [0, 20, 220]
+
+  - id: Corvette
+    name: "Corvette"
+    domain: NAVAL
+    category: surface_combatant
+    threat_level: RED
+    color_bgr: [0, 20, 220]

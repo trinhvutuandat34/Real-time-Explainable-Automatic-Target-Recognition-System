@@ -27,7 +27,12 @@ __all__ = [
     "compute_map", "make_yolo_yaml",
 ]
 
-CLASSES = ["F16", "LYNX", "MiG19", "MiG21", "PKG", "PTG"]
+import sys as _sys
+from pathlib import Path as _Path
+_reats_root = str(_Path(__file__).parent.parent)
+if _reats_root not in _sys.path:
+    _sys.path.insert(0, _reats_root)
+from config import CLASSES, NUM_CLASSES
 
 # Default anchors for 640×640 IR imagery (small targets)
 ANCHORS = [
@@ -309,7 +314,7 @@ class YOLOv4(nn.Module):
     """CSPDarknet53 → SPP+PANet → 3 detection heads."""
     def __init__(
         self,
-        num_classes: int = 6,
+        num_classes: int = NUM_CLASSES,
         anchors: List[List[Tuple[int, int]]] = None,
         strides: List[int] = None,
     ):
@@ -391,7 +396,7 @@ class YOLOv4Loss(nn.Module):
         self,
         anchors: List[List[Tuple[int, int]]] = None,
         strides: List[int] = None,
-        num_classes: int = 6,
+        num_classes: int = NUM_CLASSES,
         iou_thres: float = 0.5,
     ):
         super().__init__()
@@ -662,7 +667,7 @@ class IRDetector:
         weights: Optional[str] = None,
         conf: float = 0.25,
         iou: float = 0.45,
-        num_classes: int = 6,
+        num_classes: int = NUM_CLASSES,
         device: Optional[str] = None,
     ):
         self.conf        = conf
@@ -784,7 +789,7 @@ def make_yolo_yaml(data_root: str = "data/", out: str = "data/yolo.yaml") -> str
         "train": "train",
         "val":   "val",
         "test":  "test",
-        "nc":    6,
+        "nc":    NUM_CLASSES,
         "names": CLASSES,
     }
     Path(out).parent.mkdir(parents=True, exist_ok=True)
