@@ -1,0 +1,14 @@
+data/**
+!data/
+!data/**/
+!data/**/.gitkeep
+checkpoints/**
+!checkpoints/
+!checkpoints/.gitkeep
+runs/**
+!runs/
+!runs/.gitkeep
+__pycache__/
+*.pth
+*.pyc
+.env
