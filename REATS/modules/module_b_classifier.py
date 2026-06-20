@@ -28,6 +28,7 @@ _reats_root = str(_Path(__file__).parent.parent)
 if _reats_root not in _sys.path:
     _sys.path.insert(0, _reats_root)
 from config import CLASSES, NUM_CLASSES
+from modules.augmentation_viewpoint import MultiViewpointAugmentor
 
 CONFIG = {
     "data_root":        "data/",
@@ -76,7 +77,7 @@ class KorniaAugmentPipeline(nn.Module):
             K.RandomResizedCrop((224, 224), p=0.5),
             K.RandomHorizontalFlip(p=0.5),
             K.RandomVerticalFlip(p=0.5),
-            K.RandomRotation(degrees=30, p=0.5),
+            K.RandomRotation(degrees=180, p=0.5),
             K.RandomAffine(degrees=15, translate=(0.1, 0.1), p=0.5),
             K.RandomPerspective(distortion_scale=0.3, p=0.5),
             K.RandomBrightness(brightness=(0.7, 1.3), p=0.5),
@@ -404,7 +405,10 @@ def train_full_pipeline(
 
     train_loader, val_loader, _ = build_loaders(cfg)
     model        = build_convnext(cfg["num_classes"]).to(device)
-    aug_pipeline = KorniaAugmentPipeline().to(device)
+    aug_pipeline = nn.Sequential(
+        MultiViewpointAugmentor().to(device),
+        KorniaAugmentPipeline().to(device),
+    )
     criterion    = LabelSmoothingCrossEntropy(cfg.get("label_smoothing", 0.1))
     optimizer    = AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg.get("weight_decay", 1e-2))
     scaler       = GradScaler() if device == "cuda" else None
