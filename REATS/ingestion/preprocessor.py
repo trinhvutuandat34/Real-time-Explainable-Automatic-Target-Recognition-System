@@ -171,13 +171,26 @@ def process_annotation(
     is_thermal: bool,
 ) -> np.ndarray | None:
     """
-    Load image, apply optical→thermal conversion (if needed), extract ROI.
-    Returns uint8 grayscale patch (IMG_SIZE×IMG_SIZE) or None on failure.
+    Load image (or video frame), apply optical→thermal conversion (if needed),
+    extract ROI. Returns uint8 grayscale patch (IMG_SIZE×IMG_SIZE) or None.
+
+    Video frames: annotation must carry _frame_idx; VideoCapture seeks to that
+    frame instead of using cv2.imread.
     """
     try:
-        img = cv2.imread(str(ann["image_path"]), cv2.IMREAD_COLOR)
-        if img is None:
-            return None
+        frame_idx = ann.get("_frame_idx")
+
+        if frame_idx is not None:
+            cap = cv2.VideoCapture(str(ann["image_path"]))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ok, img = cap.read()
+            cap.release()
+            if not ok or img is None:
+                return None
+        else:
+            img = cv2.imread(str(ann["image_path"]), cv2.IMREAD_COLOR)
+            if img is None:
+                return None
 
         if not is_thermal:
             gray = optical_to_pseudo_thermal(img)
