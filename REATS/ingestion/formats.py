@@ -16,11 +16,56 @@ import csv
 import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Iterator
 
 
 def _img_exts():
     return {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+
+
+def _build_img_cache(root: Path) -> dict[str, Path]:
+    """
+    Scan root once and return {stem: path} for O(1) image lookups.
+    This replaces per-annotation rglob calls which are catastrophically slow
+    on large datasets (FLIR_Thermal: 100k+ annotations × rglob = hours).
+    """
+    cache: dict[str, Path] = {}
+    exts = _img_exts()
+    for p in root.rglob("*"):
+        if p.is_file() and p.suffix.lower() in exts:
+            cache.setdefault(p.stem, p)
+    return cache
+
+
+def _find_image(
+    root: Path,
+    fname: str,
+    cache: dict[str, Path] | None = None,
+) -> Path | None:
+    """Locate an image file by name under root.
+
+    Uses cache for O(1) lookup when provided. Falls back to rglob only when
+    cache is absent (avoid calling without cache on large datasets).
+    """
+    stem = Path(fname).stem
+    exts = _img_exts()
+    # 1. Exact path
+    direct = root / fname
+    if direct.exists():
+        return direct
+    # 2. Extension swap at root level
+    for ext in exts:
+        cand = root / (stem + ext)
+        if cand.exists():
+            return cand
+    # 3. Pre-built cache (fast)
+    if cache is not None:
+        return cache.get(stem)
+    # 4. Last resort: recursive scan (slow — only hit if no cache)
+    for ext in exts:
+        found = list(root.rglob(stem + ext))
+        if found:
+            return found[0]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -39,12 +84,15 @@ def parse_coco(
     img_meta = {i["id"]: i for i in coco.get("images", [])}
     results  = []
 
+    # Build once — avoids one rglob per annotation (critical for FLIR 100k+ entries)
+    img_cache = _build_img_cache(img_root)
+
     for ann in coco.get("annotations", []):
         img_info = img_meta.get(ann["image_id"])
         if img_info is None:
             continue
-        fname  = img_info["file_name"]
-        ipath  = _find_image(img_root, fname)
+        fname = img_info["file_name"]
+        ipath = _find_image(img_root, fname, cache=img_cache)
         if ipath is None:
             continue
         x, y, w, h = ann["bbox"]
@@ -70,28 +118,18 @@ def parse_yolo(
     class_names: list[str],
 ) -> list[dict]:
     """Parse YOLO txt annotations (normalised cx,cy,w,h)."""
-    results = []
-    exts    = _img_exts()
+    import cv2
+
+    results   = []
+    exts      = _img_exts()
+    img_cache = _build_img_cache(img_root)
 
     for txt_path in sorted(label_root.rglob("*.txt")):
-        # Find matching image
-        stem   = txt_path.stem
-        ipath  = None
-        for ext in exts:
-            cand = img_root / (stem + ext)
-            if cand.exists():
-                ipath = cand
-                break
-        if ipath is None:
-            # Try searching recursively
-            found = list(img_root.rglob(stem + ".*"))
-            if found:
-                ipath = found[0]
+        stem  = txt_path.stem
+        ipath = _find_image(img_root, stem, cache=img_cache)
         if ipath is None:
             continue
 
-        # Image dimensions needed to de-normalise
-        import cv2
         img = cv2.imread(str(ipath), cv2.IMREAD_UNCHANGED)
         if img is None:
             continue
@@ -103,7 +141,6 @@ def parse_yolo(
                 continue
             cls_idx = int(parts[0])
             cx, cy, bw, bh = map(float, parts[1:5])
-            # Convert to absolute pixel coords
             x1 = int((cx - bw / 2) * iw)
             y1 = int((cy - bh / 2) * ih)
             x2 = int((cx + bw / 2) * iw)
@@ -131,7 +168,9 @@ def parse_xml(
     img_root: Path,
 ) -> list[dict]:
     """Parse Pascal VOC XML annotations. Also handles HRSC2016 XML variant."""
-    results = []
+    results   = []
+    img_cache = _build_img_cache(img_root)
+
     for xml_path in sorted(xml_root.rglob("*.xml")):
         try:
             tree = ET.parse(xml_path)
@@ -149,9 +188,9 @@ def parse_xml(
         if fname is None:
             fname = xml_path.stem
 
-        ipath = _find_image(img_root, fname)
+        ipath = _find_image(img_root, fname, cache=img_cache)
         if ipath is None:
-            # Try xml_root itself
+            # Try xml_root parent as fallback
             ipath = _find_image(xml_path.parent, fname)
         if ipath is None:
             continue
@@ -214,15 +253,16 @@ def parse_csv(
     y2_col: str = "y2",
 ) -> list[dict]:
     """Parse a CSV annotation file with configurable column names."""
-    results = []
+    results   = []
+    img_cache = _build_img_cache(img_root)
+
     with open(csv_path, newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            # Flexible column lookup
             fname = row.get(image_col) or row.get("filename") or row.get("image")
             if not fname:
                 continue
-            ipath = _find_image(img_root, fname)
+            ipath = _find_image(img_root, fname, cache=img_cache)
             if ipath is None:
                 continue
             try:
@@ -273,28 +313,3 @@ def parse_folder(root: Path, class_names: list[str] | None = None) -> list[dict]
                 "area":       float("inf"),
             })
     return results
-
-
-# ---------------------------------------------------------------------------
-# Internal helper
-# ---------------------------------------------------------------------------
-
-def _find_image(root: Path, fname: str) -> Path | None:
-    """Locate an image file by name under root, trying multiple extensions."""
-    stem = Path(fname).stem
-    exts = _img_exts()
-    # Exact path first
-    direct = root / fname
-    if direct.exists():
-        return direct
-    # Try swapping extension
-    for ext in exts:
-        cand = root / (stem + ext)
-        if cand.exists():
-            return cand
-    # Recursive search
-    for ext in exts:
-        found = list(root.rglob(stem + ext))
-        if found:
-            return found[0]
-    return None

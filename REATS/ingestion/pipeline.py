@@ -285,6 +285,10 @@ class IngestPipeline:
         Returns {class_id: [ann_dict, ...]}.
         """
         by_class: dict[str, list[dict]] = defaultdict(list)
+        # Cap per-class pool at 4× the max target to avoid memory bloat from
+        # popular civilian labels like "car" (appears millions of times across datasets)
+        max_total = max(self.split_targets.values())
+        pool_cap  = max_total * 4
 
         for ds_key, ds_root in self.datasets.items():
             if not ds_root.exists():
@@ -306,6 +310,8 @@ class IngestPipeline:
                 cls_id = _resolve_label(ann["label"], ds_cfg, ann.get("area", 0))
                 if cls_id is None or cls_id not in CLASSES:
                     continue
+                if len(by_class[cls_id]) >= pool_cap:
+                    continue   # already have enough for this class
                 ann["_class"]    = cls_id
                 ann["_thermal"]  = is_thermal
                 ann["_dataset"]  = ds_key
