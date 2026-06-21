@@ -159,6 +159,80 @@ _KNOWN_DATASETS: dict[str, dict] = {
 }
 
 
+def _autodetect_annotations(
+    dataset_key: str,
+    dataset_root: Path,
+) -> list[dict]:
+    """
+    Fallback when configured format yields 0 annotations.
+    Tries XML → COCO JSON → YOLO in any subdir → folder, in that order.
+    Handles Kaggle datasets whose actual structure differs from the expected layout.
+    """
+    info    = _KNOWN_DATASETS.get(dataset_key, {})
+    classes = info.get("yolo_classes", ["object"])
+
+    # ── 1. XML: any dir named Annotations / annotation / labels_xml ─────
+    _xml_dir_names = {"annotations", "annotation", "labels_xml", "xmllabels"}
+    for candidate in sorted(dataset_root.rglob("*")):
+        if not candidate.is_dir():
+            continue
+        if candidate.name.lower() not in _xml_dir_names:
+            continue
+        parent  = candidate.parent
+        img_dir = next(
+            (parent / d for d in ("images", "Images", "JPEGImages", "imgs", "AllImages")
+             if (parent / d).exists()),
+            parent,
+        )
+        anns = parse_xml(candidate, img_dir)
+        if anns:
+            return anns
+
+    # ── 2. XML: any directory that contains .xml files ──────────────────
+    xml_dirs: set[Path] = set()
+    for xf in dataset_root.rglob("*.xml"):
+        xml_dirs.add(xf.parent)
+    for xml_dir in sorted(xml_dirs):
+        parent  = xml_dir.parent
+        img_dir = next(
+            (parent / d for d in ("images", "Images", "JPEGImages", "imgs")
+             if (parent / d).exists()),
+            xml_dir,   # images alongside XMLs
+        )
+        anns = parse_xml(xml_dir, img_dir)
+        if anns:
+            return anns
+
+    # ── 3. COCO JSON: any JSON with annotation/train/val in name ────────
+    for jf in sorted(dataset_root.rglob("*.json")):
+        name = jf.name.lower()
+        if not any(k in name for k in ("annotation", "train", "val", "test", "instance")):
+            continue
+        try:
+            parent   = jf.parent
+            img_root = next(
+                (parent / d for d in ("images", "imgs", "JPEGImages") if (parent / d).exists()),
+                parent,
+            )
+            anns = parse_coco(jf, img_root)
+            if anns:
+                return anns
+        except Exception:
+            pass
+
+    # ── 4. YOLO txt: any labels/ subdirectory ───────────────────────────
+    for lbl_dir in dataset_root.rglob("labels"):
+        if not lbl_dir.is_dir():
+            continue
+        img_dir = lbl_dir.parent / "images"
+        anns = parse_yolo(lbl_dir, img_dir if img_dir.exists() else dataset_root, classes)
+        if anns:
+            return anns
+
+    # ── 5. Folder-based (class name = subdir name) ───────────────────────
+    return parse_folder(dataset_root)
+
+
 def load_dataset_annotations(
     dataset_key: str,
     dataset_root: Path,
@@ -167,6 +241,7 @@ def load_dataset_annotations(
     """
     Load raw annotations from a dataset directory.
     Returns list of dicts: {image_path, bbox, label, area}.
+    If the configured format yields 0 results, auto-detects the actual format.
     """
     info = _KNOWN_DATASETS.get(dataset_key, {})
     fmt  = format_hint or info.get("format", "folder")
@@ -182,7 +257,6 @@ def load_dataset_annotations(
             if ann_path.exists() and img_root.exists():
                 annotations += parse_coco(ann_path, img_root)
             else:
-                # Try COCO JSON anywhere in root
                 for cand in dataset_root.rglob("*.json"):
                     if "annotation" in cand.name.lower() or "train" in cand.name or "val" in cand.name:
                         annotations += parse_coco(cand, dataset_root)
@@ -199,7 +273,6 @@ def load_dataset_annotations(
             if lbl_dir.exists():
                 annotations += parse_yolo(lbl_dir, img_dir if img_dir.exists() else dataset_root, classes)
         if not annotations:
-            # Last resort: search for any labels/ directory
             for lbl_dir in dataset_root.rglob("labels"):
                 if lbl_dir.is_dir():
                     annotations += parse_yolo(lbl_dir, dataset_root, classes)
@@ -216,8 +289,7 @@ def load_dataset_annotations(
         if not annotations:
             for ann_dir in dataset_root.rglob("Annotations"):
                 if ann_dir.is_dir():
-                    # Prefer sibling AllImages / Images over dataset_root
-                    parent = ann_dir.parent
+                    parent  = ann_dir.parent
                     img_dir = next(
                         (parent / d for d in ("AllImages", "Images", "images", "JPEGImages")
                          if (parent / d).exists()),
@@ -228,7 +300,6 @@ def load_dataset_annotations(
     elif fmt == "csv":
         csv_file = dataset_root / info.get("ann_file", "annotations.csv")
         if not csv_file.exists():
-            # Search for any CSV
             found = list(dataset_root.glob("*.csv"))
             if found:
                 csv_file = found[0]
@@ -239,6 +310,10 @@ def load_dataset_annotations(
     elif fmt == "folder":
         img_root = dataset_root / info.get("img_root", ".")
         annotations += parse_folder(img_root)
+
+    # ── Universal fallback: auto-detect actual format ────────────────────
+    if not annotations:
+        annotations = _autodetect_annotations(dataset_key, dataset_root)
 
     return annotations
 
