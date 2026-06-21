@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from torchvision import datasets, models, transforms
@@ -232,7 +232,7 @@ def train_one_epoch(
         imgs = aug(imgs)
         optimizer.zero_grad()
         if scaler is not None:
-            with autocast():
+            with autocast("cuda"):
                 out  = model(imgs)
                 loss = criterion(out, labels)
             scaler.scale(loss).backward()
@@ -411,7 +411,7 @@ def train_full_pipeline(
     )
     criterion    = LabelSmoothingCrossEntropy(cfg.get("label_smoothing", 0.1))
     optimizer    = AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg.get("weight_decay", 1e-2))
-    scaler       = GradScaler() if device == "cuda" else None
+    scaler       = GradScaler("cuda") if device == "cuda" else None
     ema          = ModelEMA(model, decay=cfg.get("ema_decay", 0.9999))
     scheduler    = WarmupCosineScheduler(
         optimizer,
