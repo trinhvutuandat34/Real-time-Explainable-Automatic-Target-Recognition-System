@@ -91,7 +91,13 @@ def parse_coco(
         img_info = img_meta.get(ann["image_id"])
         if img_info is None:
             continue
-        fname = img_info["file_name"]
+        fname = (
+            img_info.get("file_name")
+            or img_info.get("filename")
+            or img_info.get("path")
+        )
+        if not fname:
+            continue
         ipath = _find_image(img_root, fname, cache=img_cache)
         if ipath is None:
             continue
