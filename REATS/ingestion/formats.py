@@ -101,7 +101,10 @@ def parse_coco(
         ipath = _find_image(img_root, fname, cache=img_cache)
         if ipath is None:
             continue
-        x, y, w, h = ann["bbox"]
+        bbox = ann.get("bbox", [])
+        if len(bbox) < 4:
+            continue
+        x, y, w, h = bbox[:4]
         if w < 8 or h < 8:
             continue
         label = cat_map.get(ann.get("category_id"), "")
