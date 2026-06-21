@@ -168,17 +168,23 @@ def parse_xml(
                 continue
             label = name_el.text.strip()
 
-            # Bbox
-            bnd = obj.find("bndbox") or obj.find("Box")
+            # Bbox — handles VOC <bndbox>, HRSC <box> (lowercase), and <Box>
+            bnd = obj.find("bndbox") or obj.find("box") or obj.find("Box")
             if bnd is None:
                 continue
             try:
-                x1 = int(float(bnd.findtext("xmin") or bnd.findtext("x") or 0))
-                y1 = int(float(bnd.findtext("ymin") or bnd.findtext("y") or 0))
-                x2 = int(float(bnd.findtext("xmax") or "0") or
-                          float(bnd.findtext("x") or 0) + float(bnd.findtext("w") or 0))
-                y2 = int(float(bnd.findtext("ymax") or "0") or
-                          float(bnd.findtext("y") or 0) + float(bnd.findtext("h") or 0))
+                x1 = int(float(
+                    bnd.findtext("xmin") or bnd.findtext("box_xmin")
+                    or bnd.findtext("x") or 0))
+                y1 = int(float(
+                    bnd.findtext("ymin") or bnd.findtext("box_ymin")
+                    or bnd.findtext("y") or 0))
+                x2 = int(float(
+                    bnd.findtext("xmax") or bnd.findtext("box_xmax") or "0")
+                    or float(bnd.findtext("x") or 0) + float(bnd.findtext("w") or 0))
+                y2 = int(float(
+                    bnd.findtext("ymax") or bnd.findtext("box_ymax") or "0")
+                    or float(bnd.findtext("y") or 0) + float(bnd.findtext("h") or 0))
             except (TypeError, ValueError):
                 continue
             if x2 <= x1 or y2 <= y1:

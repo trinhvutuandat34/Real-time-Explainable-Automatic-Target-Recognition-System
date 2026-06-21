@@ -216,7 +216,14 @@ def load_dataset_annotations(
         if not annotations:
             for ann_dir in dataset_root.rglob("Annotations"):
                 if ann_dir.is_dir():
-                    annotations += parse_xml(ann_dir, dataset_root)
+                    # Prefer sibling AllImages / Images over dataset_root
+                    parent = ann_dir.parent
+                    img_dir = next(
+                        (parent / d for d in ("AllImages", "Images", "images", "JPEGImages")
+                         if (parent / d).exists()),
+                        dataset_root,
+                    )
+                    annotations += parse_xml(ann_dir, img_dir)
 
     elif fmt == "csv":
         csv_file = dataset_root / info.get("ann_file", "annotations.csv")
