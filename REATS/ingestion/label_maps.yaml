@@ -257,3 +257,40 @@ Aerial_Segmentation:
     vegetation: null
     water:      null
     ground:     null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HIT-UAV Infrared Thermal Dataset v1.2.1  (COCO JSON, thermal, UAV top-down)
+# Kaggle: trnhvtunt/dataset1
+# Classes: Person / Car / Bicycle / OtherVehicle / DontCare
+# ─────────────────────────────────────────────────────────────────────────────
+HIT_UAV_v2:
+  thermal: true
+  labels:
+    person:         null
+    car:            BTR80
+    bicycle:        null
+    othervehicle:   M109
+    other vehicle:  M109
+    dontcare:       null
+    # Capitalised variants (COCO category names vary between versions)
+    Person:         null
+    Car:            BTR80
+    Bicycle:        null
+    OtherVehicle:   M109
+    DontCare:       null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Folder-based classification dataset  (optical, various views, no bbox)
+# Kaggle: trnhvtunt/dataset2
+# Sub-folders: fixed_wing / rotary_wing / uav / vessel / vehicle_ground /
+#              vehicle_apc  (cadet_atr taxonomy — all mapped to REATS IDs)
+# ─────────────────────────────────────────────────────────────────────────────
+Dataset2_Folders:
+  thermal: false
+  labels:
+    fixed_wing:     F16       # generic fixed-wing fighter footprint
+    rotary_wing:    AH64      # generic attack helicopter
+    uav:            MQ9       # unmanned aerial vehicle
+    vessel:         Frigate   # generic naval vessel
+    vehicle_ground: BTR80     # wheeled ground vehicle
+    vehicle_apc:    BMP2      # armoured personnel carrier

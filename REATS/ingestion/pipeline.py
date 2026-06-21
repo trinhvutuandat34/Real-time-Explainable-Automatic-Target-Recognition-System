@@ -156,6 +156,29 @@ _KNOWN_DATASETS: dict[str, dict] = {
         "yolo_classes": ["building", "road", "vegetation", "water", "vehicle",
                          "airplane", "ship"],
     },
+    # HIT-UAV Infrared Thermal Dataset v1.2.1 — COCO JSON, nested structure
+    # dataset root: /kaggle/input/datasets/trnhvtunt/dataset1/
+    "HIT_UAV_v2": {
+        "format": "coco",
+        "ann_paths": [
+            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-I/normal_json/train.json",
+            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-I/normal_json/val.json",
+            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-I/rotate_json/train.json",
+            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-I/rotate_json/val.json",
+        ],
+        "img_roots": [
+            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-I/Images/Images",
+            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-I/Images/Images",
+            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-I/Images/Images",
+            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-I/Images/Images",
+        ],
+    },
+    # Folder-based classification dataset (trnhvtunt/dataset2)
+    # Sub-folders are class names: fixed_wing, rotary_wing, uav, vessel, ...
+    "Dataset2_Folders": {
+        "format": "folder",
+        "img_root": ".",
+    },
 }
 
 
@@ -495,9 +518,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Dataset keys (must match label_maps.yaml):
-  FLIR_Thermal, FLIR_ADAS_v2, HIT_UAV, HRSC2016, Ships_Aerial,
-  Ships_Google_Earth, Ships_Vessels_Aerial, SWIM, CGI_Planes,
-  Airbus_Aircraft, SwimmingPool_Car, Vehicle_Dataset, Aerial_Segmentation
+  FLIR_Thermal, FLIR_ADAS_v2, HIT_UAV, HIT_UAV_v2, HRSC2016,
+  Ships_Aerial, Ships_Google_Earth, Ships_Vessels_Aerial, SWIM,
+  CGI_Planes, Airbus_Aircraft, SwimmingPool_Car, Vehicle_Dataset,
+  Aerial_Segmentation, Dataset2_Folders
 
 Example (Kaggle):
   python -m ingestion.pipeline \\
