@@ -39,7 +39,10 @@ if str(_REATS_ROOT) not in sys.path:
     sys.path.insert(0, str(_REATS_ROOT))
 
 from config import CLASSES, NUM_CLASSES
-from ingestion.formats import parse_coco, parse_yolo, parse_xml, parse_csv, parse_folder
+from ingestion.formats import (
+    parse_coco, parse_yolo, parse_xml, parse_csv,
+    parse_folder, parse_video_folder,
+)
 from ingestion.preprocessor import process_annotation, save_patch
 
 # ---------------------------------------------------------------------------
@@ -158,24 +161,30 @@ _KNOWN_DATASETS: dict[str, dict] = {
     },
     # HIT-UAV Infrared Thermal Dataset v1.2.1 — COCO JSON, nested structure
     # dataset root: /kaggle/input/datasets/trnhvtunt/dataset1/
+    # Inner folder: suojiashun-HIT-UAV-Infrared-Thermal-Dataset-b53106c
+    # Images live at dataset_root/Images/Images  (separate from annotations)
     "HIT_UAV_v2": {
         "format": "coco",
         "ann_paths": [
-            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-I/normal_json/train.json",
-            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-I/normal_json/val.json",
-            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-I/rotate_json/train.json",
-            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-I/rotate_json/val.json",
+            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-Dataset-b53106c/normal_json/train.json",
+            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-Dataset-b53106c/normal_json/val.json",
+            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-Dataset-b53106c/rotate_json/train.json",
+            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-Dataset-b53106c/rotate_json/val.json",
         ],
-        "img_roots": [
-            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-I/Images/Images",
-            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-I/Images/Images",
-            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-I/Images/Images",
-            "HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-I/Images/Images",
-        ],
+        # Images are at dataset_root/Images/Images — use "." so _build_img_cache
+        # scans the whole root recursively and finds them regardless of nesting.
+        "img_roots": [".", ".", ".", "."],
     },
-    # Folder-based classification dataset (trnhvtunt/dataset2)
-    # Sub-folders are class names: fixed_wing, rotary_wing, uav, vessel, ...
+    # Video-based classification dataset (trnhvtunt/dataset2)
+    # Sub-folders fixed_wing / rotary_wing contain mp4 video files.
+    # parse_video_folder() samples 8 frames per video.
     "Dataset2_Folders": {
+        "format": "video_folder",
+        "img_root": ".",
+    },
+    # Aerial imagery for roof segmentation — no bbox, no military labels.
+    # Included for completeness; all labels map to null in label_maps.yaml.
+    "Aerial_Roof_Seg": {
         "format": "folder",
         "img_root": ".",
     },
@@ -252,7 +261,14 @@ def _autodetect_annotations(
         if anns:
             return anns
 
-    # ── 5. Folder-based (class name = subdir name) ───────────────────────
+    # ── 5. Video folder: mp4/avi/mov files in class sub-directories ─────
+    from ingestion.formats import _video_exts
+    if any(dataset_root.rglob(f"*{ext}") for ext in _video_exts()):
+        anns = parse_video_folder(dataset_root)
+        if anns:
+            return anns
+
+    # ── 6. Folder-based (class name = subdir name) ───────────────────────
     return parse_folder(dataset_root)
 
 
@@ -332,7 +348,11 @@ def load_dataset_annotations(
 
     elif fmt == "folder":
         img_root = dataset_root / info.get("img_root", ".")
-        annotations += parse_folder(img_root)
+        annotations += parse_folder(img_root if img_root.exists() else dataset_root)
+
+    elif fmt == "video_folder":
+        img_root = dataset_root / info.get("img_root", ".")
+        annotations += parse_video_folder(img_root if img_root.exists() else dataset_root)
 
     # ── Universal fallback: auto-detect actual format ────────────────────
     if not annotations:
@@ -521,7 +541,7 @@ Dataset keys (must match label_maps.yaml):
   FLIR_Thermal, FLIR_ADAS_v2, HIT_UAV, HIT_UAV_v2, HRSC2016,
   Ships_Aerial, Ships_Google_Earth, Ships_Vessels_Aerial, SWIM,
   CGI_Planes, Airbus_Aircraft, SwimmingPool_Car, Vehicle_Dataset,
-  Aerial_Segmentation, Dataset2_Folders
+  Aerial_Segmentation, Dataset2_Folders, Aerial_Roof_Seg
 
 Example (Kaggle):
   python -m ingestion.pipeline \\

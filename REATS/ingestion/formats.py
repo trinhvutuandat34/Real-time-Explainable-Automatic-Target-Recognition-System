@@ -313,3 +313,60 @@ def parse_folder(root: Path, class_names: list[str] | None = None) -> list[dict]
                 "area":       float("inf"),
             })
     return results
+
+
+# ---------------------------------------------------------------------------
+# Video folder  (sub-folder = class, frames sampled from each video)
+# ---------------------------------------------------------------------------
+
+def _video_exts() -> set[str]:
+    return {".mp4", ".avi", ".mov", ".mkv", ".wmv"}
+
+
+def parse_video_folder(
+    root: Path,
+    class_names: list[str] | None = None,
+    frames_per_video: int = 8,
+) -> list[dict]:
+    """
+    Like parse_folder() but for video files (mp4/avi/mov/mkv/wmv).
+
+    Each sub-directory is a class label. frames_per_video evenly-spaced
+    frames are sampled from every video file. Annotations carry a
+    _frame_idx field; process_annotation() reads that frame via
+    cv2.VideoCapture instead of cv2.imread.
+    """
+    import cv2
+
+    video_exts = _video_exts()
+    results: list[dict] = []
+
+    for cls_dir in sorted(root.iterdir()):
+        if not cls_dir.is_dir():
+            continue
+        label = cls_dir.name.lower().strip()
+        if class_names and label not in {c.lower() for c in class_names}:
+            continue
+
+        for vid_path in sorted(cls_dir.rglob("*")):
+            if vid_path.suffix.lower() not in video_exts:
+                continue
+
+            cap      = cv2.VideoCapture(str(vid_path))
+            n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+            if n_frames <= 0:
+                continue
+
+            n = min(frames_per_video, n_frames)
+            for i in range(n):
+                frame_idx = int(i * n_frames / n)
+                results.append({
+                    "image_path": vid_path,
+                    "bbox":       None,
+                    "label":      label,
+                    "area":       float("inf"),
+                    "_frame_idx": frame_idx,
+                })
+
+    return results
