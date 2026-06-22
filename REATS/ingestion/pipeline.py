@@ -298,8 +298,11 @@ def load_dataset_annotations(
             else:
                 for cand in dataset_root.rglob("*.json"):
                     if "annotation" in cand.name.lower() or "train" in cand.name or "val" in cand.name:
-                        annotations += parse_coco(cand, dataset_root)
-                        break
+                        try:
+                            annotations += parse_coco(cand, dataset_root)
+                            break
+                        except Exception:
+                            continue
 
     elif fmt == "yolo":
         classes = info.get("yolo_classes", ["object"])
@@ -420,7 +423,11 @@ class IngestPipeline:
 
             is_thermal = ds_cfg.get("thermal", False)
             print(f"  [ingest] Loading {ds_key} from {ds_root} (thermal={is_thermal})")
-            anns = load_dataset_annotations(ds_key, ds_root)
+            try:
+                anns = load_dataset_annotations(ds_key, ds_root)
+            except Exception as exc:
+                print(f"           → ERROR: {exc} — skipping dataset")
+                continue
             print(f"           → {len(anns)} raw annotations")
 
             mapped = 0
