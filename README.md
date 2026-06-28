@@ -182,6 +182,45 @@ streamlit run modules/module_d_dashboard.py
 
 ---
 
+## Kaggle workflow
+
+The primary execution environment is `notebooks/01_kaggle_full_pipeline.ipynb`. Run cells in order:
+
+| Cell | Purpose |
+|------|---------|
+| `c-install` | pip install all deps (streamlit, watchdog, pyngrok, …) |
+| `c-clone` | git clone/pull + clear `__pycache__` + evict stale modules |
+| `c-config` | Set dataset paths and hyperparameters |
+| `c-gpu` | Detect GPU, set `device` |
+| `c-ingest` | Run ingestion pipeline across all 16 datasets |
+| `c-module-a` | Instantiate IRDetector, run detection smoke-test |
+| `c-module-b` | Train ConvNeXt-tiny × 6 ensemble (~18–24 h on T4/P100) |
+| `c-faithfulness` | Run GradCAM + faithfulness AUC evaluation |
+| `c-dashboard` | Launch Streamlit + ngrok tunnel |
+
+### Ingestion pipeline datasets
+
+| Dataset key | Format | Source |
+|------------|--------|--------|
+| `FLIR_Thermal` | COCO JSON | Thermal street-level (civilian) |
+| `FLIR_ADAS_v2` | COCO JSON | Teledyne FLIR road dataset |
+| `HIT_UAV` | YOLO txt | HIT-UAV infrared, UAV top-down |
+| `HIT_UAV_v2` | COCO JSON | HIT-UAV v1.2.1 (dataset1, trnhvtunt) |
+| `Dataset2_Folders` | Video folder | Fixed/rotary wing mp4 clips (dataset2, trnhvtunt) |
+| `HRSC2016` | Pascal VOC XML | High-resolution ship collection |
+| `Ships_Aerial` | YOLO txt | Ship detection from aerial images |
+| `Ships_Google_Earth` | Folder | Ships in Google Earth |
+| `Ships_Vessels_Aerial` | CSV | Ships/vessels in aerial images |
+| `SWIM` | Folder | Ship wake imagery |
+| `CGI_Planes` | Folder | CGI planes in satellite imagery |
+| `Airbus_Aircraft` | CSV | Airbus aircraft detection |
+| `SwimmingPool_Car` | Folder | Swimming pool + car detection |
+| `Vehicle_Dataset` | Folder | Vehicle dataset (car/truck/tank/APC) |
+| `Aerial_Segmentation` | Folder | Semantic segmentation of aerial imagery |
+| `Aerial_Roof_Seg` | Folder | Roof segmentation (all labels → null) |
+
+---
+
 ## cadet_atr quickstart
 
 Run all commands from `cadet_atr_project/cadet_atr/`.
