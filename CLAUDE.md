@@ -8,12 +8,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | Directory | Purpose | Entry point |
 |---|---|---|
-| `REATS/` | Primary system — full ATR pipeline (Modules A–D) | `modules/module_*.py`, `notebooks/00_baseline.ipynb` |
+| `REATS/` | Primary system — full ATR pipeline (Modules A–E) | `modules/module_*.py` |
 | `cadet_atr_project/cadet_atr/` | Research scaffold — domain adaptation experiments | `run_experiment.py` |
 
 The two systems use **different class taxonomies**:
-- **REATS**: `F16, LYNX, MiG19, MiG21, PKG, PTG` (Naval CMS targets from Do et al. 2025)
-- **cadet_atr**: `fixed_wing, rotary_wing, uav, vessel, vehicle_ground, vehicle_apc` (expanded airborne+ground set)
+- **REATS**: 43-class taxonomy (AIR / GROUND / NAVAL) defined in `REATS/config/targets.yaml` — single source of truth; all modules load from it automatically
+- **cadet_atr**: `fixed_wing, rotary_wing, uav, vessel, vehicle_ground, vehicle_apc` (mapped to REATS classes via `ingestion/label_maps.yaml`)
 
 ---
 
@@ -42,6 +42,24 @@ python REATS/verify_env.py
 ## Common REATS commands
 
 ```bash
+# End-to-end smoke test — no GPU or real data required
+python REATS/smoke_test.py
+
+# Evaluate all metrics against paper targets
+python REATS/metrics_report.py --cls-weights checkpoints/convnext_best.pth
+python REATS/metrics_report.py --quick   # skip slow faithfulness + mAP
+
+# Bootstrap YOLOv4 detector weights (downloads COCO darknet weights, converts to PyTorch)
+python REATS/bootstrap_detector_weights.py
+# or from an existing checkpoint / darknet .weights file:
+python REATS/bootstrap_detector_weights.py --weights checkpoints/my_yolov4.pt
+python REATS/bootstrap_detector_weights.py --darknet ~/yolov4.weights
+
+# Ingest raw datasets into the standard REATS split
+cd REATS && python -m ingestion.pipeline \
+    --datasets FLIR_Thermal:/path/to/flir HIT_UAV:/path/to/hit_uav \
+    --out data/ --train 170 --val 30 --test 200
+
 # Validate dataset split (170 train / 30 val / 200 test per class)
 python REATS/dataset_validator.py
 
@@ -49,14 +67,18 @@ python REATS/dataset_validator.py
 python REATS/dataset_validator.py --source raw/ --organize
 
 # Generate synthetic / FLIR-remapped training data
-python REATS/generate_flir_fallback.py --out REATS/data/              # synth-only
-python REATS/generate_flir_fallback.py --flir /path/to/flir_adas/ --out REATS/data/  # FLIR
+python REATS/generate_flir_fallback.py --out REATS/data/
+python REATS/generate_flir_fallback.py --flir /path/to/flir_adas/ --out REATS/data/
 
 # Train Module B (ConvNeXt, single model)
 cd REATS && python modules/module_b_classifier.py
 
 # Run the Streamlit dashboard
 cd REATS && streamlit run modules/module_d_dashboard.py
+
+# Start the iPhone live-feed streamer (Module E)
+cd REATS && python modules/module_e_streamer.py --ngrok   # HTTPS via ngrok
+cd REATS && python modules/module_e_streamer.py           # HTTP on LAN only
 ```
 
 MLflow experiment logs write to `REATS/runs/`; checkpoints to `REATS/checkpoints/`.
@@ -68,22 +90,13 @@ MLflow experiment logs write to `REATS/runs/`; checkpoints to `REATS/checkpoints
 Run from `cadet_atr_project/cadet_atr/`:
 
 ```bash
-# Smoke test (no GPU or real data required)
 python smoke_test.py
-
-# Train synthetic baseline
 python run_experiment.py --mode baseline_only
-
-# Run a single adaptation strategy
 python run_experiment.py --mode adapt --strategy histogram    --checkpoint checkpoints/baseline_best.pt
 python run_experiment.py --mode adapt --strategy domain_random
 python run_experiment.py --mode adapt --strategy finetune    --checkpoint checkpoints/domain_random_best.pt
 python run_experiment.py --mode adapt --strategy dann        --checkpoint checkpoints/domain_random_best.pt
-
-# Measure domain gap on a saved checkpoint
 python run_experiment.py --mode gap_only --checkpoint checkpoints/dann_best.pt
-
-# Full pipeline (all 4 strategies sequentially)
 python run_experiment.py --mode full
 ```
 
@@ -100,22 +113,40 @@ IR Frame
                                           train_full_pipeline() for one model
                                           train_ensemble() for all 6
                                           TemperatureScaler for post-hoc ECE calibration
-  └─► Module C  module_c_xai.py          GradCAM / GradCAM++ / EigenCAM
+  └─► Module C  module_c_xai.py          GradCAM / GradCAM++ / EigenCAM (pytorch-grad-cam)
                                           SHAP DeepExplainer, LIME
                                           MCDropoutWrapper (entropy → OOD flag)
                                           faithfulness deletion/insertion AUC
-  └─► Module D  module_d_dashboard.py    Streamlit 4-tab UI
-                                          (Live Analysis | Batch | Calibration | About)
+  └─► Module D  module_d_dashboard.py    Streamlit 5-tab UI
+                                          (Live Analysis | Batch | Calibration | About | iPhone Live Feed)
+  └─► Module E  module_e_streamer.py     FastAPI + WebSocket server
+                                          serves HTML capture page to iPhone
+                                          /frame → latest JPEG, /status → JSON stats
+                                          polled by Module D's iPhone Live Feed tab
 ```
 
-**Data flow between modules**: Module A produces ROI crops → Module B classifies them → Module C explains the classification → Module D displays everything in real time.
+**Data flow**: Module A produces ROI crops → Module B classifies → Module C explains → Module D displays in real time. Module E feeds live iPhone camera frames into Module D.
 
-**Module A is pure PyTorch** — no ultralytics. The `ultralytics` line in `requirements.txt` is only used by `verify_env.py`. `IRDetector.detect()` runs the full YOLOv4 forward pass + NMS internally.
+### Key implementation details
+
+**Module A** is pure PyTorch — no ultralytics at runtime. The `ultralytics` line in `requirements.txt` is only used by `verify_env.py`. `IRDetector.detect()` runs the full YOLOv4 forward pass + NMS internally. Training uses `MosaicDataset` which expects YOLO-format layout: `data/{split}/images/*.jpg` + `data/{split}/labels/*.txt` (class cx cy w h, normalised).  Default checkpoint: `checkpoints/detector_bootstrap.pt`.
 
 **Module B training quirks**:
-- `train_one_epoch` accepts optional `scaler` (AMP GradScaler) and `ema` (ModelEMA) — both `None` by default.
-- Validation and checkpointing only run from epoch `CONFIG["best_epoch_start"]` (225/300) — this is intentional per the paper.
-- `compute_ece` accepts `is_probs=False`; set `True` when passing ensemble output (already softmax).
+- `train_one_epoch` accepts optional `scaler` (AMP GradScaler) and `ema` (ModelEMA) — both `None` by default
+- Validation and checkpointing only run from epoch `CONFIG["best_epoch_start"]` (225/300) — intentional per the paper
+- `compute_ece` accepts `is_probs=False`; set `True` when passing ensemble output (already softmax)
+- `EnsembleClassifier.forward()` returns probabilities (post-softmax mean), not logits
+
+**Module C**: `GradCAMExplainer` requires `pytorch-grad-cam`; the inline `_eigen_cam` helper in Module D is gradient-free and ~5–10× faster — prefer it for real-time use. `MCDropoutWrapper.forward()` returns `{mean_probs, uncertainty, all_probs}`.
+
+**Config / taxonomy**: `REATS/config/__init__.py` loads `targets.yaml` and exports `CLASSES, NUM_CLASSES, TARGET_META, THREAT_COLOR_BGR, RED_THREATS, ORANGE_THREATS, YELLOW_THREATS`. All modules import from here — never hardcode class names or counts.
+
+### Ingestion pipeline
+
+`REATS/ingestion/` handles raw dataset → REATS split conversion:
+- `formats.py` — parsers for COCO JSON, YOLO txt, Pascal VOC XML, CSV, folder-per-class, and video (frame-sampled)
+- `label_maps.yaml` — maps every source dataset's raw labels to REATS class IDs (supports `__size_rule__` for area-based disambiguation)
+- `pipeline.py` — orchestrates parsers + label resolution + `preprocessor.py` patch extraction + stratified train/val/test split
 
 ---
 
@@ -146,7 +177,7 @@ run_experiment.py            CLI dispatcher → run_adapt_strategy() / run_full_
 
 ## Git / data layout
 
-`REATS/.gitignore` excludes `data/**`, `checkpoints/**`, `runs/**` (large files). Placeholder `.gitkeep` files track directory structure. The pattern used is:
+`REATS/.gitignore` excludes `data/**`, `checkpoints/**`, `runs/**` (large files). Placeholder `.gitkeep` files track directory structure:
 ```
 data/**
 !data/
@@ -154,8 +185,6 @@ data/**
 !data/**/.gitkeep
 ```
 Force-adding `.gitkeep` files requires `git add -f`; ordinary `git add` will ignore them.
-
-Active development branch: `claude/clever-goodall-fsmqnr`
 
 ---
 
@@ -170,7 +199,7 @@ Active development branch: `claude/clever-goodall-fsmqnr`
 | Faithfulness AUC | ≥ 0.80 |
 | FPS | ≥ 20 |
 
-Single ConvNeXt_tiny achieves ~90.25%; the 6-model softmax ensemble pushes to ~92%.
+Single ConvNeXt_tiny achieves ~90.25%; the 6-model softmax ensemble pushes to ~92%. Latency and FPS targets require GPU — CPU numbers are for architecture validation only.
 
 ---
 
