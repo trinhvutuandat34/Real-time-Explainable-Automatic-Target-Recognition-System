@@ -53,7 +53,16 @@ def load_pipeline(det_weights: str, cls_weights_csv: str):
     for w in [p.strip() for p in cls_weights_csv.split(",") if p.strip()]:
         m = build_convnext(num_classes=len(CLASSES), pretrained=False)
         if Path(w).exists():
-            m.load_state_dict(torch.load(w, map_location="cpu"))
+            ckpt = torch.load(w, map_location="cpu")
+            # Checkpoint dict may wrap the state_dict under several keys
+            # (ema_state_dict preferred — that's the smoothed weights)
+            state = (
+                ckpt.get("ema_state_dict")
+                or ckpt.get("model_state_dict")
+                or ckpt.get("state_dict")
+                or ckpt
+            ) if isinstance(ckpt, dict) else ckpt
+            m.load_state_dict(state)
         m.eval()
         total_cls_params += sum(p.numel() for p in m.parameters())
         models.append(m)
