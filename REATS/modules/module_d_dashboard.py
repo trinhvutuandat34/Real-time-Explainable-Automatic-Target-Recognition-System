@@ -312,7 +312,7 @@ def _render_sidebar():
     """Render sidebar; returns (det_weights, cls_weights_csv, thresholds, flags)."""
     with st.sidebar:
         st.header("⚙️ Model Configuration")
-        det_weights  = st.text_input("Detector weights path", "checkpoints/yolov8_ir.pt")
+        det_weights  = st.text_input("Detector weights path", "checkpoints/detector_bootstrap.pt")
         cls_weights  = st.text_input(
             "Classifier weights (comma-separated)",
             "checkpoints/convnext_best.pth",
@@ -611,12 +611,11 @@ def _tab_calibration():
 
     if zip_file is None:
         st.info("Upload a test-set ZIP to compute calibration metrics.")
-        # Show placeholder reliability diagram
         fig, ax = plt.subplots(figsize=(5, 4))
-        ax.bar(np.linspace(0.05, 0.95, 10), np.linspace(0.05, 0.95, 10), width=0.09, alpha=0.6, label="Perfect")
         ax.plot([0, 1], [0, 1], "k--", label="Perfect calibration")
         ax.set_xlabel("Confidence"); ax.set_ylabel("Accuracy")
-        ax.set_title("Reliability Diagram (placeholder)")
+        ax.set_title("Reliability Diagram")
+        ax.set_xlim(0, 1); ax.set_ylim(0, 1)
         ax.legend()
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
