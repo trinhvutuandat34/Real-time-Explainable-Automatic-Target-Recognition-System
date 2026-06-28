@@ -12,6 +12,9 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable
 
+# np.trapz was renamed to np.trapezoid in NumPy 2.0
+_trapezoid = getattr(np, "trapezoid", getattr(np, "trapz", None))
+
 
 class MCDropoutWrapper(nn.Module):
     """Bayesian approximation via MC Dropout — n_samples forward passes at inference."""
@@ -213,7 +216,7 @@ def faithfulness_deletion_auc(
             prob = torch.softmax(model(x_flat.view(x.shape)), dim=-1)[0, class_idx].item()
             scores.append(prob)
     baseline = scores[0]
-    return float(np.trapz(scores, dx=1.0 / steps) / baseline) if baseline > 0 else 0.0
+    return float(_trapezoid(scores, dx=1.0 / steps) / baseline) if baseline > 0 else 0.0
 
 
 def faithfulness_insertion_auc(
@@ -242,7 +245,7 @@ def faithfulness_insertion_auc(
             prob = torch.softmax(model(rev_flat.view(x.shape)), dim=-1)[0, class_idx].item()
             scores.append(prob)
     final = scores[-1]
-    return float(np.trapz(scores, dx=1.0 / steps) / final) if final > 0 else 0.0
+    return float(_trapezoid(scores, dx=1.0 / steps) / final) if final > 0 else 0.0
 
 
 def _get_cam_explainer(
