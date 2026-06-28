@@ -45,12 +45,22 @@ class GradCAMExplainer:
         from pytorch_grad_cam import GradCAM
         from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
         self._Target = ClassifierOutputTarget
+        self._model  = model
         layer        = target_layer if target_layer is not None else model.features[-1][-1]
+        # GradCAM needs grads to flow through the model parameters even at inference
+        for p in model.parameters():
+            p.requires_grad_(True)
         self.cam     = GradCAM(model=model, target_layers=[layer])
 
     def explain(self, x: torch.Tensor, class_idx: int) -> np.ndarray:
-        """Return (H, W) heatmap in [0, 1] for x: (1, C, H, W)."""
-        return self.cam(input_tensor=x, targets=[self._Target(class_idx)])[0]
+        """Return (H, W) heatmap in [0, 1] for x: (1, C, H, W).
+
+        Runs inside torch.enable_grad() so it works even when the caller
+        wraps the call in a torch.no_grad() block.
+        """
+        with torch.enable_grad():
+            x = x.detach().clone().requires_grad_(True)
+            return self.cam(input_tensor=x, targets=[self._Target(class_idx)])[0]
 
 
 class GradCAMPlusPlusExplainer:
@@ -60,12 +70,17 @@ class GradCAMPlusPlusExplainer:
         from pytorch_grad_cam import GradCAMPlusPlus
         from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
         self._Target = ClassifierOutputTarget
+        self._model  = model
         layer        = target_layer if target_layer is not None else model.features[-1][-1]
+        for p in model.parameters():
+            p.requires_grad_(True)
         self.cam     = GradCAMPlusPlus(model=model, target_layers=[layer])
 
     def explain(self, x: torch.Tensor, class_idx: int) -> np.ndarray:
         """Return (H, W) heatmap in [0, 1] for x: (1, C, H, W)."""
-        return self.cam(input_tensor=x, targets=[self._Target(class_idx)])[0]
+        with torch.enable_grad():
+            x = x.detach().clone().requires_grad_(True)
+            return self.cam(input_tensor=x, targets=[self._Target(class_idx)])[0]
 
 
 class EigenCAMExplainer:
@@ -75,12 +90,17 @@ class EigenCAMExplainer:
         from pytorch_grad_cam import EigenCAM
         from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
         self._Target = ClassifierOutputTarget
+        self._model  = model
         layer        = target_layer if target_layer is not None else model.features[-1][-1]
+        for p in model.parameters():
+            p.requires_grad_(True)
         self.cam     = EigenCAM(model=model, target_layers=[layer])
 
     def explain(self, x: torch.Tensor, class_idx: int) -> np.ndarray:
         """Return (H, W) heatmap in [0, 1] for x: (1, C, H, W)."""
-        return self.cam(input_tensor=x, targets=[self._Target(class_idx)])[0]
+        with torch.enable_grad():
+            x = x.detach().clone().requires_grad_(True)
+            return self.cam(input_tensor=x, targets=[self._Target(class_idx)])[0]
 
 
 class SHAPExplainer:
