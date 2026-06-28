@@ -200,8 +200,10 @@ def faithfulness_deletion_auc(
     """Mask top-saliency pixels progressively; AUC of class-prob drop. Target ≥ 0.80."""
     model.eval().to(device)
     x     = x.clone().to(device)
-    order = np.argsort(saliency.flatten())[::-1]
-    step  = len(order) // steps
+    # .copy() — [::-1] returns a view with negative stride which PyTorch
+    # indexing rejects with "negative strides are not currently supported"
+    order = np.argsort(saliency.flatten())[::-1].copy()
+    step  = max(1, len(order) // steps)
     scores = []
     with torch.no_grad():
         for i in range(steps + 1):
@@ -225,8 +227,9 @@ def faithfulness_insertion_auc(
     """Reveal top-saliency pixels progressively; AUC of class-prob rise. Target ≥ 0.80."""
     model.eval().to(device)
     x      = x.clone().to(device)
-    order  = np.argsort(saliency.flatten())[::-1]
-    step   = len(order) // steps
+    # .copy() — see note in faithfulness_deletion_auc
+    order  = np.argsort(saliency.flatten())[::-1].copy()
+    step   = max(1, len(order) // steps)
     blank  = torch.zeros_like(x)
     scores = []
     with torch.no_grad():
