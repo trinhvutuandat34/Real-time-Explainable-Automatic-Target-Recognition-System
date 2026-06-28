@@ -114,7 +114,7 @@ def run_pipeline(
 ) -> dict:
     """Run full pipeline on one frame; returns detections + latency."""
     t0 = time.perf_counter()
-    detections = detector.detect(frame, conf=conf_thresh, iou=iou_thresh)
+    detections = detector.detect(frame, conf_thresh=conf_thresh, iou_thresh=iou_thresh)
     tf = _get_transform()
     results = []
 
