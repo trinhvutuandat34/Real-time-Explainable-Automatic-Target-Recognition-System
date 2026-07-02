@@ -675,8 +675,18 @@ class IRDetector:
         self.num_classes = num_classes
         self.device      = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.model       = YOLOv4(num_classes=num_classes).to(self.device)
-        if weights and Path(weights).exists():
+        # weights_path records what was actually loaded; None = random init
+        # (acceptable for smoke tests, never for operational use)
+        self.weights_path: Optional[str] = None
+        if weights:
+            if not Path(weights).exists():
+                raise FileNotFoundError(
+                    f"Detector weights not found: {weights} — "
+                    f"run bootstrap_detector_weights.py or pass weights=None "
+                    f"for an explicitly untrained model."
+                )
             self._load_weights(weights)
+            self.weights_path = weights
         self.model.eval()
 
     def _load_weights(self, path: str) -> None:

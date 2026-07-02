@@ -41,40 +41,53 @@ MAX_VIDEO_FRAMES = 30
 
 @st.cache_resource(show_spinner=False)
 def load_pipeline(det_weights: str, cls_weights_csv: str):
-    """Load detector + classifier ensemble; returns (detector, classifier, param_counts)."""
+    """Load detector + classifier ensemble; returns (detector, classifier, param_counts).
+
+    Every requested checkpoint must exist — a missing file raises instead of
+    silently substituting random weights, so the operator never sees
+    untrained predictions presented as real ones.
+    """
     from modules.module_a_detector   import IRDetector
     from modules.module_b_classifier import build_convnext, EnsembleClassifier
+
+    cls_paths = [p.strip() for p in cls_weights_csv.split(",") if p.strip()]
+    if not cls_paths:
+        raise ValueError("No classifier weights given — enter at least one .pth path.")
+    missing = [w for w in cls_paths if not Path(w).exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Classifier checkpoint(s) not found: " + ", ".join(missing)
+        )
 
     detector = IRDetector(weights=det_weights)
     det_params = sum(p.numel() for p in detector.model.parameters()) if hasattr(detector, "model") else 0
 
     models = []
     total_cls_params = 0
-    for w in [p.strip() for p in cls_weights_csv.split(",") if p.strip()]:
+    for w in cls_paths:
         m = build_convnext(num_classes=len(CLASSES), pretrained=False)
-        if Path(w).exists():
-            ckpt = torch.load(w, map_location="cpu")
-            # Checkpoint dict may wrap the state_dict under several keys
-            # (ema_state_dict preferred — that's the smoothed weights)
-            state = (
-                ckpt.get("ema_state_dict")
-                or ckpt.get("model_state_dict")
-                or ckpt.get("state_dict")
-                or ckpt
-            ) if isinstance(ckpt, dict) else ckpt
-            m.load_state_dict(state)
+        ckpt = torch.load(w, map_location="cpu")
+        # Checkpoint dict may wrap the state_dict under several keys
+        # (ema_state_dict preferred — that's the smoothed weights)
+        state = (
+            ckpt.get("ema_state_dict")
+            or ckpt.get("model_state_dict")
+            or ckpt.get("state_dict")
+            or ckpt
+        ) if isinstance(ckpt, dict) else ckpt
+        m.load_state_dict(state)
         m.eval()
         total_cls_params += sum(p.numel() for p in m.parameters())
         models.append(m)
 
-    if not models:
-        m = build_convnext(num_classes=len(CLASSES), pretrained=False)
-        m.eval()
-        total_cls_params = sum(p.numel() for p in m.parameters())
-        models.append(m)
-
     classifier = EnsembleClassifier(models)
-    return detector, classifier, {"detector": det_params, "classifier": total_cls_params}
+    info = {
+        "detector":    det_params,
+        "classifier":  total_cls_params,
+        "det_ckpt":    Path(det_weights).name,
+        "cls_ckpts":   [Path(w).name for w in cls_paths],
+    }
+    return detector, classifier, info
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +351,11 @@ def _render_sidebar():
                 f"Det params: {pcounts['detector']:,}   "
                 f"Cls params: {pcounts['classifier']:,}"
             )
+            if "det_ckpt" in pcounts:
+                st.caption(
+                    f"Det: `{pcounts['det_ckpt']}`   "
+                    f"Cls: {', '.join(f'`{c}`' for c in pcounts['cls_ckpts'])}"
+                )
         else:
             st.info("No models loaded. Click **Load Models** to begin.")
 
