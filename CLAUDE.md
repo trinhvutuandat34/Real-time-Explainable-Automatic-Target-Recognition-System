@@ -203,6 +203,21 @@ Single ConvNeXt_tiny achieves ~90.25%; the 6-model softmax ensemble pushes to ~9
 
 ---
 
+## Docker deployment
+
+```bash
+docker compose up --build
+# Dashboard: http://localhost:8501   Streamer (Module E): http://localhost:7860
+```
+
+Two services share one image (`Dockerfile` builds from `REATS/requirements.txt` + `REATS/`):
+- `dashboard` — Streamlit (Modules A–D), reaches the streamer via `REATS_STREAMER_URL=http://streamer:7860`
+- `streamer` — Module E (`module_e_streamer.py --host 0.0.0.0 --port 7860`)
+
+`docker-compose.yml` bind-mounts `REATS/checkpoints`, `REATS/data`, `REATS/runs` so they persist across container restarts. GPU support requires uncommenting the `deploy:` block (needs `nvidia-container-toolkit`) — otherwise both services run on CPU.
+
+---
+
 ## Kaggle notebook workflow (`notebooks/01_kaggle_full_pipeline.ipynb`)
 
 Run cells in order: `c-install` → `c-clone` → `c-config` → `c-gpu` → `c-ingest` → `c-module-a` → `c-module-b` → `c-faithfulness` → `c-dashboard`.
