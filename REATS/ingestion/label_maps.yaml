@@ -209,6 +209,8 @@ CGI_Planes:
     fighter:  F16
     bomber:   B52
     jet:      F16
+    # Airbus sample CSV classes ('Truncated_airplane' = clipped at tile edge)
+    truncated_airplane: null
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Airbus Aircraft Detection  (optical, aerial, top-down)
