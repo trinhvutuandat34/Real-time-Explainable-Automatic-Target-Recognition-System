@@ -175,6 +175,22 @@ def _test_module_b_heterogeneous_ensemble():
 check("module_b.heterogeneous_ensemble", _test_module_b_heterogeneous_ensemble)
 
 
+def _test_module_b_preprocess_roi():
+    """Real-time ROI preprocessing (cv2 path used by Module D's live feed)."""
+    from modules.module_b_classifier import preprocess_roi
+    import numpy as np
+    roi_bgr  = np.random.randint(0, 255, (96, 128, 3), dtype=np.uint8)
+    roi_gray = roi_bgr[:, :, 0]
+    for roi in (roi_bgr, roi_gray):
+        t = preprocess_roi(roi)
+        assert t.shape == (1, 3, 224, 224), t.shape
+        assert -1.001 <= float(t.min()) and float(t.max()) <= 1.001
+        assert torch.equal(t[0, 0], t[0, 1])  # grayscale replicated across channels
+    return "BGR + grayscale ROI → (1,3,224,224) in [-1,1]"
+
+check("module_b.preprocess_roi", _test_module_b_preprocess_roi)
+
+
 def _test_module_b_kornia_aug():
     from modules.module_b_classifier import KorniaAugmentPipeline
     pipe = KorniaAugmentPipeline()

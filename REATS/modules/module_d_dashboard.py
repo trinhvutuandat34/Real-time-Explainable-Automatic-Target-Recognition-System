@@ -119,6 +119,15 @@ def _get_transform():
 # Pipeline execution
 # ---------------------------------------------------------------------------
 
+def _batch_size_for(model) -> int:
+    """Inference batch size by device: GPU amortises kernel launches with big
+    batches; a CPU forward already saturates the cores, so keep chunks small."""
+    try:
+        return 32 if next(model.parameters()).device.type == "cuda" else 4
+    except StopIteration:
+        return 4
+
+
 def run_pipeline(
     frame: np.ndarray,
     detector,
@@ -135,48 +144,73 @@ def run_pipeline(
     tf = _get_transform()
     results = []
 
+    # ROIs are classified in chunked batches: one ensemble forward per CHUNK
+    # detections instead of one per detection, while keeping memory bounded —
+    # an untrained/misconfigured detector can emit thousands of boxes, so
+    # stacking every ROI into a single batch is not safe. Chunk size is
+    # device-aware: on a 4-thread CPU a single forward already saturates the
+    # cores and big batches regress (measured: batch 4 ≈ 49 ms/img vs batch 32
+    # ≈ 75 ms/img); on GPU larger batches amortise kernel launches.
+    CHUNK = _batch_size_for(classifier)
+    pend_rois: list = []
+    pend_tensors: list = []
+    pend_dets: list = []
+
+    def _classify_pending() -> None:
+        if not pend_tensors:
+            return
+        with torch.no_grad():
+            batch_probs = classifier(torch.stack(pend_tensors))
+
+        for det, roi_bgr, tensor_3d, probs in zip(pend_dets, pend_rois, pend_tensors, batch_probs):
+            tensor = tensor_3d.unsqueeze(0)
+
+            pred_idx  = int(probs.argmax())
+            pred_cls  = CLASSES[pred_idx]
+            conf      = float(probs[pred_idx])
+
+            # MC Dropout uncertainty
+            uncertainty = None
+            if mc_dropout:
+                classifier.train()  # enable dropout
+                mc_probs = []
+                for _ in range(mc_passes):
+                    with torch.no_grad():
+                        mc_probs.append(classifier(tensor)[0].numpy())
+                classifier.eval()
+                mc_arr    = np.stack(mc_probs)               # (passes, C)
+                mean_p    = mc_arr.mean(axis=0)
+                entropy   = float(-np.sum(mean_p * np.log(mean_p + 1e-9)))
+                uncertainty = {"entropy": round(entropy, 4), "std": mc_arr.std(axis=0).tolist()}
+
+            # Grad-CAM (simple single-model approximation)
+            heatmap = None
+            if run_xai:
+                heatmap = _grad_cam(classifier, tensor, pred_idx, roi_bgr.shape[:2])
+
+            results.append({
+                "bbox":        det["bbox"],
+                "class":       pred_cls,
+                "confidence":  round(conf, 4),
+                "probs":       {CLASSES[i]: round(float(p), 4) for i, p in enumerate(probs)},
+                "uncertainty": uncertainty,
+                "heatmap":     heatmap,
+            })
+        pend_rois.clear()
+        pend_tensors.clear()
+        pend_dets.clear()
+
     for det in detections:
         roi = detector.crop_roi(frame, det["bbox"])
         if roi.size == 0:
             continue
         roi_bgr = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR) if roi.ndim == 2 else roi
-        tensor  = tf(roi_bgr).unsqueeze(0)
-
-        # Standard inference
-        with torch.no_grad():
-            probs = classifier(tensor)[0]
-
-        pred_idx  = int(probs.argmax())
-        pred_cls  = CLASSES[pred_idx]
-        conf      = float(probs[pred_idx])
-
-        # MC Dropout uncertainty
-        uncertainty = None
-        if mc_dropout:
-            classifier.train()  # enable dropout
-            mc_probs = []
-            for _ in range(mc_passes):
-                with torch.no_grad():
-                    mc_probs.append(classifier(tensor)[0].numpy())
-            classifier.eval()
-            mc_arr    = np.stack(mc_probs)               # (passes, C)
-            mean_p    = mc_arr.mean(axis=0)
-            entropy   = float(-np.sum(mean_p * np.log(mean_p + 1e-9)))
-            uncertainty = {"entropy": round(entropy, 4), "std": mc_arr.std(axis=0).tolist()}
-
-        # Grad-CAM (simple single-model approximation)
-        heatmap = None
-        if run_xai:
-            heatmap = _grad_cam(classifier, tensor, pred_idx, roi_bgr.shape[:2])
-
-        results.append({
-            "bbox":        det["bbox"],
-            "class":       pred_cls,
-            "confidence":  round(conf, 4),
-            "probs":       {CLASSES[i]: round(float(p), 4) for i, p in enumerate(probs)},
-            "uncertainty": uncertainty,
-            "heatmap":     heatmap,
-        })
+        pend_rois.append(roi_bgr)
+        pend_tensors.append(tf(roi_bgr))
+        pend_dets.append(det)
+        if len(pend_tensors) >= CHUNK:
+            _classify_pending()
+    _classify_pending()
 
     return {"detections": results, "latency_ms": (time.perf_counter() - t0) * 1000}
 
@@ -677,6 +711,35 @@ def _tab_calibration():
         all_pred_idx: list = []
         per_class: dict = {}
 
+        tf = _get_transform()
+        BATCH = _batch_size_for(classifier)
+        pending_tensors: list = []
+        pending_true: list = []
+
+        def _flush():
+            """Classify pending tensors as one batch (one ensemble forward instead
+            of one per image). EnsembleClassifier returns probabilities, so
+            temperature scaling goes through log space: softmax(log(p)/T) — the
+            identity at T=1, unlike dividing probabilities as if they were logits."""
+            if not pending_tensors:
+                return
+            with torch.no_grad():
+                probs = classifier(torch.stack(pending_tensors))
+                probs = torch.softmax(torch.log(probs.clamp_min(1e-12)) / T_scale, dim=-1)
+            conf_b, pred_b = probs.max(dim=-1)
+            for true_idx, pred_idx, conf in zip(pending_true, pred_b.tolist(), conf_b.tolist()):
+                correct = int(pred_idx == true_idx)
+                all_confs.append(float(conf))
+                all_corrects.append(correct)
+                all_true_idx.append(true_idx)
+                all_pred_idx.append(pred_idx)
+                label_name = CLASSES[true_idx]
+                per_class.setdefault(label_name, {"correct": 0, "total": 0})
+                per_class[label_name]["correct"] += correct
+                per_class[label_name]["total"]   += 1
+            pending_tensors.clear()
+            pending_true.clear()
+
         for name in names:
             parts = Path(name).parts
             if len(parts) < 2:
@@ -684,7 +747,6 @@ def _tab_calibration():
             label_name = parts[-2]
             if label_name not in CLASSES:
                 continue
-            true_idx = CLASSES.index(label_name)
 
             data  = zf.read(name)
             arr   = np.frombuffer(data, np.uint8)
@@ -692,25 +754,11 @@ def _tab_calibration():
             if frame is None:
                 continue
 
-            from torchvision import transforms as T
-            tf = _get_transform()
-            tensor = tf(frame).unsqueeze(0)
-            with torch.no_grad():
-                logits = classifier(tensor)[0]
-                scaled = logits / T_scale
-                probs  = torch.softmax(scaled, dim=0)
-
-            pred_idx  = int(probs.argmax())
-            conf      = float(probs[pred_idx])
-            correct   = int(pred_idx == true_idx)
-            all_confs.append(conf)
-            all_corrects.append(correct)
-            all_true_idx.append(true_idx)
-            all_pred_idx.append(pred_idx)
-
-            per_class.setdefault(label_name, {"correct": 0, "total": 0})
-            per_class[label_name]["correct"] += correct
-            per_class[label_name]["total"]   += 1
+            pending_tensors.append(tf(frame))
+            pending_true.append(CLASSES.index(label_name))
+            if len(pending_tensors) >= BATCH:
+                _flush()
+        _flush()
 
     if not all_confs:
         st.warning("No valid images found in ZIP (check folder structure).")
@@ -1006,18 +1054,23 @@ def _tab_live_feed(conf_thresh: float, iou_thresh: float, hm_opacity: float) -> 
         except Exception:
             detections = []
 
+        from modules.module_b_classifier import preprocess_roi
+        from modules.threat_policy import map_confidence_to_policy
+
         for det in detections:
             x1, y1, x2, y2 = (int(v) for v in det["bbox"])
             roi = frame_bgr[y1:y2, x1:x2]
             if roi.size == 0:
                 continue
 
-            # Classify ROI
+            # Classify ROI (EnsembleClassifier already returns probabilities —
+            # a second softmax would flatten confidences toward uniform and break
+            # the Warning/Track/Engagement thresholds)
+            tensor = None
             try:
-                from modules.module_b_classifier import preprocess_roi
                 tensor = preprocess_roi(roi)
                 with torch.no_grad():
-                    probs = classifier(tensor).softmax(-1).squeeze(0).cpu().numpy()
+                    probs = classifier(tensor).squeeze(0).cpu().numpy()
                 top_idx   = int(probs.argmax())
                 top_conf  = float(probs[top_idx])
                 top_class = CLASSES[top_idx] if top_idx < len(CLASSES) else str(top_idx)
@@ -1025,22 +1078,25 @@ def _tab_live_feed(conf_thresh: float, iou_thresh: float, hm_opacity: float) -> 
             except Exception:
                 top_idx = 0; top_conf = 0.0; top_class = "unknown"; meta = {}
 
-            # XAI overlay
+            # XAI overlay — reuse the classification tensor, don't re-preprocess
             heatmap = None
-            if xai_mode.startswith("EigenCAM"):
+            if tensor is not None and xai_mode.startswith("EigenCAM"):
                 try:
-                    from modules.module_b_classifier import preprocess_roi
-                    t = preprocess_roi(roi)
-                    heatmap = _eigen_cam(classifier, t, top_idx, roi.shape[:2])
+                    heatmap = _eigen_cam(classifier, tensor, top_idx, roi.shape[:2])
                 except Exception:
                     pass
-            elif xai_mode.startswith("Grad-CAM"):
+            elif tensor is not None and xai_mode.startswith("Grad-CAM"):
                 try:
                     from modules.module_c_xai import GradCAMExplainer
-                    t = preprocess_roi(roi)   # type: ignore[assignment]
                     model = classifier.models[0] if hasattr(classifier, "models") else classifier
-                    exp = GradCAMExplainer(model)
-                    heatmap = exp.explain(t, target_class=top_idx, roi_shape=roi.shape[:2])
+                    # Hook registration is not free at 15 FPS — cache the explainer
+                    # across frames until the loaded model changes
+                    exp = st.session_state.get("_gradcam_explainer")
+                    if exp is None or st.session_state.get("_gradcam_model") is not model:
+                        exp = GradCAMExplainer(model)
+                        st.session_state["_gradcam_explainer"] = exp
+                        st.session_state["_gradcam_model"] = model
+                    heatmap = exp.explain(tensor, target_class=top_idx, roi_shape=roi.shape[:2])
                 except Exception:
                     pass
 
@@ -1056,7 +1112,6 @@ def _tab_live_feed(conf_thresh: float, iou_thresh: float, hm_opacity: float) -> 
                 blended = _blend_heatmap(roi, heatmap, hm_opacity)
                 annotated[y1:y2, x1:x2] = blended
 
-            from modules.threat_policy import map_confidence_to_policy
             det_cards.append({
                 "class": top_class,
                 "conf":  top_conf,
