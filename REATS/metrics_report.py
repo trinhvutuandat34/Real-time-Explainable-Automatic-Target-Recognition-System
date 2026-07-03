@@ -45,17 +45,24 @@ TARGETS = {
 
 
 def _load_classifier(weights_csv: str):
-    from modules.module_b_classifier import build_convnext, EnsembleClassifier
+    from modules.module_b_classifier import build_model, EnsembleClassifier
     paths  = [p.strip() for p in weights_csv.split(",") if p.strip()]
     models = []
     for w in paths:
-        m = build_convnext(num_classes=NUM_CLASSES, pretrained=False)
+        arch = "convnext_tiny"
+        state = None
         if Path(w).exists():
             ckpt  = torch.load(w, map_location="cpu")
-            state = ckpt.get("model_state", ckpt)
-            m.load_state_dict(state)
+            if isinstance(ckpt, dict):
+                arch  = ckpt.get("arch", "convnext_tiny")
+                state = ckpt.get("ema_state_dict") or ckpt.get("model_state") or ckpt.get("state_dict") or ckpt
+            else:
+                state = ckpt
         else:
             print(f"  [warn] weights not found: {w} — using random init")
+        m = build_model(arch, num_classes=NUM_CLASSES, pretrained=False)
+        if state is not None:
+            m.load_state_dict(state)
         m.eval()
         models.append(m)
     if len(models) == 1:
@@ -222,6 +229,16 @@ def main():
             acc, ece = measure_accuracy_ece(model, val_loader, device, is_probs=is_ensemble)
             print(f"  Accuracy        : {_fmt('accuracy', acc)}")
             print(f"  ECE             : {_fmt('ece', ece)}")
+
+            print("\n[Battlefield threat analysis — False Alarm Rate / Miss Rate]")
+            from modules.threat_metrics import far_mr_from_model, format_report
+            far_mr = far_mr_from_model(model, val_loader, device)
+            print(format_report(far_mr, top_n=10))
+            print(
+                "  (FAR = false-alarm rate on civilian/friendly-like misclassification, "
+                "1-Precision; MR = missed-target rate, 1-Recall — RED-threat MR is the "
+                "critical figure: a missed enemy fighter never raises an alarm.)"
+            )
 
             if not args.quick:
                 print("[Faithfulness AUC]")

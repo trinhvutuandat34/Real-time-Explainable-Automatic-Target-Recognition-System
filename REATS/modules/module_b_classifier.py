@@ -1,6 +1,7 @@
 """
 MODULE B — ATR Classifier
-ConvNeXt_tiny + Averaging Ensemble (6 models).
+Heterogeneous 6-architecture Averaging Ensemble: ConvNeXt_tiny, ResNeXt50_32x4d,
+ViT_b_16, Swin_T, VGG16, ResNet18 — one model per architecture, not 6 seeds of one.
 Target: Accuracy ≥ 92%, ECE ≤ 0.05
 Paper: Do et al. (2025), JKSCI Vol.30 No.1
 Hyperparams: AdamW lr=1e-4, batch=128, epochs=300, checkpoint from epoch 225
@@ -103,8 +104,72 @@ def build_convnext(num_classes: int = NUM_CLASSES, pretrained: bool = True) -> n
     return model
 
 
+def build_resnext50(num_classes: int = NUM_CLASSES, pretrained: bool = True) -> nn.Module:
+    """ResNeXt50_32x4d with ImageNet weights; final Linear replaced for num_classes."""
+    weights = models.ResNeXt50_32X4D_Weights.IMAGENET1K_V1 if pretrained else None
+    model   = models.resnext50_32x4d(weights=weights)
+    model.fc = nn.Linear(model.fc.in_features, num_classes)
+    return model
+
+
+def build_vit_b_16(num_classes: int = NUM_CLASSES, pretrained: bool = True) -> nn.Module:
+    """ViT_b_16 with ImageNet weights; classification head replaced for num_classes."""
+    weights = models.ViT_B_16_Weights.IMAGENET1K_V1 if pretrained else None
+    model   = models.vit_b_16(weights=weights)
+    model.heads.head = nn.Linear(model.heads.head.in_features, num_classes)
+    return model
+
+
+def build_swin_t(num_classes: int = NUM_CLASSES, pretrained: bool = True) -> nn.Module:
+    """Swin_T with ImageNet weights; final Linear replaced for num_classes."""
+    weights = models.Swin_T_Weights.IMAGENET1K_V1 if pretrained else None
+    model   = models.swin_t(weights=weights)
+    model.head = nn.Linear(model.head.in_features, num_classes)
+    return model
+
+
+def build_vgg16(num_classes: int = NUM_CLASSES, pretrained: bool = True) -> nn.Module:
+    """VGG16 with ImageNet weights; final Linear replaced for num_classes."""
+    weights = models.VGG16_Weights.IMAGENET1K_V1 if pretrained else None
+    model   = models.vgg16(weights=weights)
+    in_feat = model.classifier[6].in_features
+    model.classifier[6] = nn.Linear(in_feat, num_classes)
+    return model
+
+
+def build_resnet18(num_classes: int = NUM_CLASSES, pretrained: bool = True) -> nn.Module:
+    """ResNet18 with ImageNet weights; final Linear replaced for num_classes."""
+    weights = models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
+    model   = models.resnet18(weights=weights)
+    model.fc = nn.Linear(model.fc.in_features, num_classes)
+    return model
+
+
+# The 6 heterogeneous architectures required by Do et al. (2025) / professor's spec —
+# fuses local CNN features (ResNet/VGG/ResNeXt/ConvNeXt) with global Transformer
+# features (ViT/Swin), unlike averaging 6 seeds of a single architecture.
+ARCHITECTURES: List[str] = ["convnext_tiny", "resnext50", "vit_b_16", "swin_t", "vgg16", "resnet18"]
+
+_MODEL_BUILDERS = {
+    "convnext_tiny": build_convnext,
+    "resnext50":     build_resnext50,
+    "vit_b_16":      build_vit_b_16,
+    "swin_t":        build_swin_t,
+    "vgg16":         build_vgg16,
+    "resnet18":      build_resnet18,
+}
+
+
+def build_model(arch: str, num_classes: int = NUM_CLASSES, pretrained: bool = True) -> nn.Module:
+    """Dispatch to the architecture-specific builder — `arch` must be a key of ARCHITECTURES."""
+    if arch not in _MODEL_BUILDERS:
+        raise ValueError(f"Unknown architecture '{arch}'. Choose from {ARCHITECTURES}")
+    return _MODEL_BUILDERS[arch](num_classes=num_classes, pretrained=pretrained)
+
+
 class EnsembleClassifier(nn.Module):
-    """Softmax averaging over N ConvNeXt models — paper uses 6."""
+    """Softmax averaging over N models — architecture-agnostic, so it works for both
+    the legacy homogeneous ensemble and the paper's heterogeneous 6-architecture ensemble."""
     def __init__(self, models_list: list):
         super().__init__()
         self.models = nn.ModuleList(models_list)
@@ -396,15 +461,16 @@ def train_full_pipeline(
     cfg: dict,
     seed: int = 42,
     ckpt_path: str = "checkpoints/convnext_best.pth",
+    arch: str = "convnext_tiny",
 ) -> Tuple[float, str]:
-    """Train a single ConvNeXt end-to-end with AMP, EMA, and warmup-cosine LR."""
+    """Train a single model (architecture `arch`) end-to-end with AMP, EMA, and warmup-cosine LR."""
     torch.manual_seed(seed)
     np.random.seed(seed)
     device = cfg["device"]
     Path("checkpoints").mkdir(exist_ok=True)
 
     train_loader, val_loader, _ = build_loaders(cfg)
-    model        = build_convnext(cfg["num_classes"]).to(device)
+    model        = build_model(arch, cfg["num_classes"]).to(device)
     aug_pipeline = nn.Sequential(
         MultiViewpointAugmentor().to(device),
         KorniaAugmentPipeline().to(device),
@@ -422,9 +488,10 @@ def train_full_pipeline(
 
     best_val_acc = 0.0
     mlflow.set_experiment("REATS-Baseline")
-    with mlflow.start_run(run_name=f"ConvNeXt_seed{seed}"):
+    with mlflow.start_run(run_name=f"{arch}_seed{seed}"):
         mlflow.log_params({k: v for k, v in cfg.items() if not isinstance(v, list)})
         mlflow.log_param("seed", seed)
+        mlflow.log_param("arch", arch)
         for epoch in range(1, cfg["epochs"] + 1):
             scheduler.step(epoch)
             tr_loss, tr_acc = train_one_epoch(
@@ -444,6 +511,7 @@ def train_full_pipeline(
                             "epoch":          epoch,
                             "best_val_acc":   best_val_acc,
                             "ema_state_dict": ema.module.state_dict(),
+                            "arch":           arch,
                         },
                         ckpt_path,
                     )
@@ -457,17 +525,21 @@ def train_full_pipeline(
 
 def train_ensemble(
     cfg: dict,
-    n_models: int = 6,
+    architectures: Optional[List[str]] = None,
     ckpt_dir: str = "checkpoints/",
 ) -> List[str]:
-    """Train n_models independently with seeds 42..42+n_models-1."""
+    """Train one model per architecture in `architectures` (default: the 6 heterogeneous
+    architectures from Do et al. 2025 — ConvNeXt_tiny, ResNeXt50, ViT_b_16, Swin_T, VGG16,
+    ResNet18), each with a distinct seed. A heterogeneous ensemble fuses local CNN features
+    with global Transformer features; it is not 6 seeds of one architecture."""
+    architectures = architectures or ARCHITECTURES
     Path(ckpt_dir).mkdir(exist_ok=True)
     paths: List[str] = []
-    for i in range(n_models):
+    for i, arch in enumerate(architectures):
         seed = 42 + i
-        path = str(Path(ckpt_dir) / f"convnext_{i}.pth")
-        print(f"\n=== Training model {i} (seed={seed}) ===")
-        _, saved = train_full_pipeline(cfg, seed=seed, ckpt_path=path)
+        path = str(Path(ckpt_dir) / f"{arch}_{i}.pth")
+        print(f"\n=== Training model {i}: {arch} (seed={seed}) ===")
+        _, saved = train_full_pipeline(cfg, seed=seed, ckpt_path=path, arch=arch)
         paths.append(saved)
     return paths
 
@@ -477,11 +549,14 @@ def load_ensemble(
     num_classes: int = NUM_CLASSES,
     device: str = "cpu",
 ) -> EnsembleClassifier:
-    """Load N checkpoints into EnsembleClassifier."""
+    """Load N checkpoints into EnsembleClassifier. Each checkpoint's architecture is read
+    from its saved 'arch' field, so a heterogeneous ensemble loads correctly; checkpoints
+    saved before this field existed default to convnext_tiny for backward compatibility."""
     loaded: List[nn.Module] = []
     for path in ckpt_paths:
-        m = build_convnext(num_classes, pretrained=False).to(device)
         ckpt = torch.load(path, map_location=device)
+        arch = ckpt.get("arch", "convnext_tiny")
+        m = build_model(arch, num_classes, pretrained=False).to(device)
         state = ckpt.get("ema_state_dict", ckpt.get("state_dict", ckpt))
         m.load_state_dict(state)
         m.eval()

@@ -157,6 +157,24 @@ def _test_module_b_ensemble():
 check("module_b.ensemble", _test_module_b_ensemble)
 
 
+def _test_module_b_heterogeneous_ensemble():
+    """Gap 1: 6 distinct architectures (ConvNeXt/ResNeXt/ViT/Swin/VGG/ResNet), not 6 seeds of one."""
+    from modules.module_b_classifier import ARCHITECTURES, build_model, EnsembleClassifier
+    from config import NUM_CLASSES
+    assert len(ARCHITECTURES) == 6
+    models = [build_model(arch, NUM_CLASSES, pretrained=False) for arch in ARCHITECTURES]
+    ens = EnsembleClassifier(models)
+    ens.eval()
+    dummy = torch.zeros(1, 3, 224, 224)
+    with torch.no_grad():
+        probs = ens(dummy)
+    assert probs.shape == (1, NUM_CLASSES)
+    assert abs(float(probs.sum()) - 1.0) < 1e-4, "probabilities don't sum to 1"
+    return f"6 architectures {ARCHITECTURES} → ensemble probs sum={float(probs.sum()):.4f}"
+
+check("module_b.heterogeneous_ensemble", _test_module_b_heterogeneous_ensemble)
+
+
 def _test_module_b_kornia_aug():
     from modules.module_b_classifier import KorniaAugmentPipeline
     pipe = KorniaAugmentPipeline()
@@ -237,6 +255,58 @@ def _test_module_c_mcdropout():
     return f"uncertainty={float(out['uncertainty'][0]):.4f}"
 
 check("module_c.mc_dropout", _test_module_c_mcdropout)
+
+
+# ---------------------------------------------------------------------------
+# 5b. Threat metrics / hard-negative mining / operational policy
+# ---------------------------------------------------------------------------
+
+def _test_threat_metrics_far_mr():
+    from modules.threat_metrics import compute_far_mr
+    from config import CLASSES
+    n = len(CLASSES)
+    labels = list(range(n)) + [0, 1]     # perfect diagonal + one extra FN/FP pair
+    preds  = list(range(n)) + [1, 1]     # class 0 missed once, class 1 has one extra FP
+    report = compute_far_mr(labels, preds)
+    assert 0.0 <= report["macro_FAR"] <= 1.0
+    assert 0.0 <= report["macro_MR"] <= 1.0
+    assert report["per_class"][CLASSES[0]]["FN"] == 1
+    assert report["per_class"][CLASSES[1]]["FP"] == 1
+    return f"macro_FAR={report['macro_FAR']:.4f} macro_MR={report['macro_MR']:.4f}"
+
+check("threat_metrics.far_mr", _test_threat_metrics_far_mr)
+
+
+def _test_hard_negative_mining():
+    from modules.hard_negative_mining import CONFUSABLE_GROUPS, mine_hard_negatives
+    from modules.module_b_classifier import build_convnext
+    from config import NUM_CLASSES, CLASSES
+    import torch.utils.data as tud
+
+    assert any({"F16", "MiG19", "MiG21"} <= g for g in CONFUSABLE_GROUPS)
+
+    class _DummyDS(tud.Dataset):
+        def __len__(self): return 8
+        def __getitem__(self, idx):
+            return torch.zeros(3, 224, 224), idx % NUM_CLASSES
+
+    model = build_convnext(NUM_CLASSES, pretrained=False)
+    model.eval()
+    hard_idx = mine_hard_negatives(model, _DummyDS(), "cpu", margin_thresh=1.1)  # everything below margin
+    assert isinstance(hard_idx, list)
+    return f"{len(hard_idx)} hard-negative indices flagged"
+
+check("hard_negative_mining.mine", _test_hard_negative_mining)
+
+
+def _test_threat_policy_mapping():
+    from modules.threat_policy import map_confidence_to_policy
+    assert map_confidence_to_policy(0.95, "RED") == "ENGAGEMENT"
+    assert map_confidence_to_policy(0.95, "YELLOW") == "WARNING"
+    assert map_confidence_to_policy(0.10, "RED") == "NONE"
+    return "RED@0.95→ENGAGEMENT, YELLOW@0.95→WARNING (ceiling), RED@0.10→NONE"
+
+check("threat_policy.map_confidence", _test_threat_policy_mapping)
 
 
 # ---------------------------------------------------------------------------
