@@ -49,7 +49,7 @@ def load_pipeline(det_weights: str, cls_weights_csv: str):
     untrained predictions presented as real ones.
     """
     from modules.module_a_detector   import IRDetector
-    from modules.module_b_classifier import build_convnext, EnsembleClassifier
+    from modules.module_b_classifier import build_model, EnsembleClassifier
 
     cls_paths = [p.strip() for p in cls_weights_csv.split(",") if p.strip()]
     if not cls_paths:
@@ -66,8 +66,11 @@ def load_pipeline(det_weights: str, cls_weights_csv: str):
     models = []
     total_cls_params = 0
     for w in cls_paths:
-        m = build_convnext(num_classes=len(CLASSES), pretrained=False)
         ckpt = torch.load(w, map_location="cpu")
+        # Each checkpoint carries its own 'arch' (heterogeneous ensemble support);
+        # checkpoints saved before that field existed default to convnext_tiny.
+        arch = ckpt.get("arch", "convnext_tiny") if isinstance(ckpt, dict) else "convnext_tiny"
+        m = build_model(arch, num_classes=len(CLASSES), pretrained=False)
         # Checkpoint dict may wrap the state_dict under several keys
         # (ema_state_dict preferred — that's the smoothed weights)
         state = (
@@ -449,13 +452,18 @@ def _tab_live(conf_thresh, iou_thresh, xai_enabled, hm_opacity, mc_dropout):
             st.info("No targets detected in this frame.")
 
         # Per-detection cards
+        from modules.threat_policy import map_confidence_to_policy, POLICY_DESCRIPTION
+        POLICY_ICONS = {"NONE": "⚪", "WARNING": "🟡", "TRACK": "🟠", "ENGAGEMENT": "🔴"}
         for i, det in enumerate(output["detections"]):
             meta = TARGET_META.get(det["class"], {})
             domain   = meta.get("domain", "")
             category = meta.get("category", "")
+            threat_level = meta.get("threat_level", "YELLOW")
+            policy = map_confidence_to_policy(det["confidence"], threat_level)
             label = f"Target {i+1}: {det['class']} ({det['confidence']:.0%})"
             if domain:
                 label += f"  [{domain} / {category}]"
+            label += f"  — {POLICY_ICONS.get(policy, '⚪')} {policy}"
             with st.expander(label, expanded=True):
                 c1, c2 = st.columns(2)
                 c1.metric("Class", det["class"])
@@ -463,6 +471,8 @@ def _tab_live(conf_thresh, iou_thresh, xai_enabled, hm_opacity, mc_dropout):
                 c1.metric("Confidence", f"{det['confidence']:.1%}")
                 c1.metric("Domain", domain or "—")
                 c1.metric("Category", category or "—")
+                c1.metric("CMS policy", f"{POLICY_ICONS.get(policy, '⚪')} {policy}")
+                st.caption(f"**{policy}**: {POLICY_DESCRIPTION.get(policy, '')}")
                 # Show top-5 classes by probability
                 top5 = dict(
                     sorted(det["probs"].items(), key=lambda kv: kv[1], reverse=True)[:5]
@@ -663,6 +673,8 @@ def _tab_calibration():
         names   = zf.namelist()
         all_confs: list = []
         all_corrects: list = []
+        all_true_idx: list = []
+        all_pred_idx: list = []
         per_class: dict = {}
 
         for name in names:
@@ -693,6 +705,8 @@ def _tab_calibration():
             correct   = int(pred_idx == true_idx)
             all_confs.append(conf)
             all_corrects.append(correct)
+            all_true_idx.append(true_idx)
+            all_pred_idx.append(pred_idx)
 
             per_class.setdefault(label_name, {"correct": 0, "total": 0})
             per_class[label_name]["correct"] += correct
@@ -744,6 +758,31 @@ def _tab_calibration():
         for cls, v in sorted(per_class.items())
     ]
     st.dataframe(pc_rows, use_container_width=True)
+
+    # Battlefield threat analysis — False Alarm Rate / Miss Rate
+    st.subheader("Battlefield Threat Analysis — FAR / MR")
+    st.caption(
+        "FAR (False Alarm Rate = 1-Precision): rate a civilian/friendly-like target is "
+        "misidentified as this threat class. MR (Miss Rate = 1-Recall): rate an actual "
+        "instance of this class is never flagged — the critical failure mode for RED threats."
+    )
+    from modules.threat_metrics import compute_far_mr
+    far_mr = compute_far_mr(all_true_idx, all_pred_idx)
+    c1, c2 = st.columns(2)
+    c1.metric("Macro FAR", f"{far_mr['macro_FAR']:.1%}")
+    c1.metric("Macro MR", f"{far_mr['macro_MR']:.1%}")
+    c2.metric("RED-threat FAR", f"{far_mr['red_threat_FAR']:.1%}" if far_mr["n_red_threats"] else "N/A")
+    c2.metric("RED-threat MR (missed-fighter risk)",
+              f"{far_mr['red_threat_MR']:.1%}" if far_mr["n_red_threats"] else "N/A")
+
+    far_mr_rows = [
+        {"class": cls, "threat_level": TARGET_META.get(cls, {}).get("threat_level", "—"),
+         "FAR": f"{m['FAR']:.1%}", "MR": f"{m['MR']:.1%}",
+         "TP": m["TP"], "FP": m["FP"], "FN": m["FN"]}
+        for cls, m in sorted(far_mr["per_class"].items(), key=lambda kv: kv[1]["MR"], reverse=True)
+        if per_class.get(cls, {}).get("total", 0) > 0
+    ]
+    st.dataframe(far_mr_rows, use_container_width=True)
 
 
 # ---------------------------------------------------------------------------
@@ -803,7 +842,26 @@ Module D — Operator Dashboard (this UI)
 - 🔴 RED — high-threat combat platforms (fighters, attack helicopters, armed UAVs, armed vessels)
 - 🟠 ORANGE — surveillance / transport platforms (ISR UAVs, utility helicopters)
 - 🟡 YELLOW — lower-threat or friendly-like platforms (air defense, cargo vessels)
+        """
+    )
 
+    from modules.threat_policy import CONFIDENCE_THRESHOLDS, THREAT_LEVEL_CEILING, POLICY_DESCRIPTION
+    st.markdown("**CMS operational policy** — confidence + threat_level → tactical action tier")
+    policy_rows = [
+        {"tier": tier, "confidence ≥": CONFIDENCE_THRESHOLDS.get(tier, "—"),
+         "max threat_level": next((lvl for lvl, ceil in THREAT_LEVEL_CEILING.items() if ceil == tier), "—"),
+         "description": POLICY_DESCRIPTION[tier]}
+        for tier in ("WARNING", "TRACK", "ENGAGEMENT")
+    ]
+    st.dataframe(policy_rows, use_container_width=True)
+    st.caption(
+        "Engagement authority is reserved for RED-threat classes — ORANGE/YELLOW targets "
+        "cap out at TRACK/WARNING regardless of confidence, since a false engagement "
+        "recommendation on a misclassified civilian/friendly target is the costliest failure mode."
+    )
+
+    st.markdown(
+        """
 **Citation**
 ```
 @misc{reats2025,
@@ -998,10 +1056,12 @@ def _tab_live_feed(conf_thresh: float, iou_thresh: float, hm_opacity: float) -> 
                 blended = _blend_heatmap(roi, heatmap, hm_opacity)
                 annotated[y1:y2, x1:x2] = blended
 
+            from modules.threat_policy import map_confidence_to_policy
             det_cards.append({
                 "class": top_class,
                 "conf":  top_conf,
                 "threat": threat,
+                "policy": map_confidence_to_policy(top_conf, threat),
                 "name":  meta.get("name", top_class),
                 "domain": meta.get("domain", ""),
             })
@@ -1013,6 +1073,8 @@ def _tab_live_feed(conf_thresh: float, iou_thresh: float, hm_opacity: float) -> 
     frame_ph.image(frame_rgb, use_container_width=True)
 
     # Threat banner
+    THREAT_ICONS = {"RED": "🔴", "ORANGE": "🟠", "YELLOW": "🟡"}
+    POLICY_ICONS = {"NONE": "⚪", "WARNING": "🟡", "TRACK": "🟠", "ENGAGEMENT": "🔴"}
     if det_cards:
         threats = {c["threat"] for c in det_cards}
         if "RED" in threats:
@@ -1024,9 +1086,10 @@ def _tab_live_feed(conf_thresh: float, iou_thresh: float, hm_opacity: float) -> 
 
         for c in det_cards:
             icon = THREAT_ICONS.get(c["threat"], "⚪")
+            picon = POLICY_ICONS.get(c["policy"], "⚪")
             st.markdown(
                 f"{icon} **{c['class']}** — {c['name']}  "
-                f"(*{c['domain']}*) — conf {c['conf']:.1%}"
+                f"(*{c['domain']}*) — conf {c['conf']:.1%}  |  {picon} **{c['policy']}**"
             )
     else:
         detect_ph.info("No detections in this frame.")

@@ -2,13 +2,16 @@
 REATS target taxonomy — single source of truth loaded from targets.yaml.
 
 Exported symbols:
-    CLASSES          list[str]         ordered class IDs (e.g. ["F16", "LYNX", …])
-    NUM_CLASSES      int               len(CLASSES)
-    TARGET_META      dict[str, dict]   full metadata per class id
-    THREAT_COLOR_BGR dict[str, tuple]  BGR colour for bounding-box overlays
-    RED_THREATS      set[str]
-    ORANGE_THREATS   set[str]
-    YELLOW_THREATS   set[str]
+    CLASSES            list[str]         ordered class IDs (e.g. ["F16", "LYNX", …])
+    NUM_CLASSES        int               len(CLASSES)
+    TARGET_META        dict[str, dict]   full metadata per class id
+    THREAT_COLOR_BGR   dict[str, tuple]  BGR colour for bounding-box overlays
+    RED_THREATS        set[str]
+    ORANGE_THREATS     set[str]
+    YELLOW_THREATS     set[str]
+    OPERATIONAL_POLICY dict              confidence_thresholds + threat_level_ceiling
+                                          for the Warning/Track/Engagement CMS mapping
+                                          (see modules/threat_policy.py)
 """
 
 from __future__ import annotations
@@ -32,10 +35,11 @@ def _load() -> tuple:
     for c in entries:
         lvl = c.get("threat_level", "YELLOW")
         sets.setdefault(lvl, set()).add(c["id"])
-    return classes, meta, colors, sets
+    policy: dict = raw.get("operational_policy", {})
+    return classes, meta, colors, sets, policy
 
 
-CLASSES, TARGET_META, THREAT_COLOR_BGR, _THREAT_SETS = _load()
+CLASSES, TARGET_META, THREAT_COLOR_BGR, _THREAT_SETS, OPERATIONAL_POLICY = _load()
 
 NUM_CLASSES:    int       = len(CLASSES)
 RED_THREATS:    set[str] = _THREAT_SETS.get("RED", set())

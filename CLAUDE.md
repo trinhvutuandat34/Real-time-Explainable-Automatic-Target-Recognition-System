@@ -73,6 +73,16 @@ python REATS/generate_flir_fallback.py --flir /path/to/flir_adas/ --out REATS/da
 # Train Module B (ConvNeXt, single model)
 cd REATS && python modules/module_b_classifier.py
 
+# Train the full 6-architecture heterogeneous ensemble (ConvNeXt_tiny, ResNeXt50,
+# ViT_b_16, Swin_T, VGG16, ResNet18 — one model per architecture, not 6 seeds of one)
+cd REATS && python -c "from modules.module_b_classifier import train_ensemble, CONFIG; train_ensemble(CONFIG)"
+
+# Hard-negative mining + fine-tune pass on confusable classes (F16/MiG19/MiG21)
+cd REATS && python modules/hard_negative_mining.py --checkpoint checkpoints/convnext_tiny_0.pth --arch convnext_tiny
+
+# FAR/MR battlefield threat report (alongside accuracy/ECE/mAP/latency)
+python REATS/metrics_report.py --cls-weights checkpoints/convnext_tiny_0.pth
+
 # Run the Streamlit dashboard
 cd REATS && streamlit run modules/module_d_dashboard.py
 
@@ -109,16 +119,24 @@ IR Frame
   └─► Module A  module_a_detector.py     YOLOv4 (CSPDarknet53 + SPP + PANet)
                                           detect() → list of {bbox, conf, class_id}
                                           crop_roi() pads each detection
-  └─► Module B  module_b_classifier.py   ConvNeXt_tiny × 6 (softmax-averaging ensemble)
+  └─► Module B  module_b_classifier.py   Heterogeneous 6-architecture softmax-averaging
+                                          ensemble: ConvNeXt_tiny, ResNeXt50, ViT_b_16,
+                                          Swin_T, VGG16, ResNet18 (one model per arch)
                                           train_full_pipeline() for one model
                                           train_ensemble() for all 6
                                           TemperatureScaler for post-hoc ECE calibration
+                                          hard_negative_mining.py — extra fine-tune pass
+                                          on confusable classes (F16/MiG19/MiG21)
   └─► Module C  module_c_xai.py          GradCAM / GradCAM++ / EigenCAM (pytorch-grad-cam)
                                           SHAP DeepExplainer, LIME
                                           MCDropoutWrapper (entropy → OOD flag)
                                           faithfulness deletion/insertion AUC
   └─► Module D  module_d_dashboard.py    Streamlit 5-tab UI
                                           (Live Analysis | Batch | Calibration | About | iPhone Live Feed)
+                                          threat_policy.py — confidence + threat_level →
+                                          Warning/Track/Engagement CMS policy tier
+                                          threat_metrics.py — per-class FAR/MR
+                                          (False Alarm Rate / Miss Rate) reporting
   └─► Module E  module_e_streamer.py     FastAPI + WebSocket server
                                           serves HTML capture page to iPhone
                                           /frame → latest JPEG, /status → JSON stats
@@ -135,11 +153,18 @@ IR Frame
 - `train_one_epoch` accepts optional `scaler` (AMP GradScaler) and `ema` (ModelEMA) — both `None` by default
 - Validation and checkpointing only run from epoch `CONFIG["best_epoch_start"]` (225/300) — intentional per the paper
 - `compute_ece` accepts `is_probs=False`; set `True` when passing ensemble output (already softmax)
-- `EnsembleClassifier.forward()` returns probabilities (post-softmax mean), not logits
+- `EnsembleClassifier.forward()` returns probabilities (post-softmax mean), not logits — architecture-agnostic, so it works for both the legacy homogeneous ensemble and the heterogeneous one
+- `ARCHITECTURES = ["convnext_tiny", "resnext50", "vit_b_16", "swin_t", "vgg16", "resnet18"]` — the 6 architectures required by Do et al. (2025); `build_model(arch, num_classes, pretrained)` dispatches to the right builder. `train_ensemble(cfg, architectures=None)` trains one model per architecture (default: all 6) instead of 6 seeds of one architecture — each checkpoint saves its `arch` under the `"arch"` key so `load_ensemble()` / dashboard `load_pipeline()` reconstruct the right network per file. Checkpoints saved before this field existed default to `convnext_tiny` for backward compatibility.
+
+**Hard negative mining** (`modules/hard_negative_mining.py`): addresses the F16/MiG19/MiG21 confusion the KCI paper's confusion matrix shows (similar fighter silhouettes). `CONFUSABLE_GROUPS` lists class-name sets; `mine_hard_negatives(model, dataset, device)` flags samples that are misclassified or have a low top1/top2 softmax margin, restricted to those groups. `HardNegativeDataset` oversamples the flagged indices; `finetune_on_hard_negatives(...)` runs a short low-LR pass on top of an already-trained checkpoint — it is a post-hoc addition to the normal 300-epoch schedule, not a replacement for it.
+
+**Threshold-operational policy** (`modules/threat_policy.py`): `map_confidence_to_policy(confidence, threat_level)` maps a detection to one of `NONE / WARNING / TRACK / ENGAGEMENT`. Thresholds and the per-threat-level ceiling live in `config/targets.yaml`'s `operational_policy` section (loaded as `config.OPERATIONAL_POLICY`) — not hardcoded in the module. Engagement authority is capped to RED-threat classes regardless of confidence.
+
+**FAR/MR battlefield threat metrics** (`modules/threat_metrics.py`): `compute_far_mr(labels, preds)` returns per-class FAR (`FP/(FP+TP)` = 1-Precision) and MR (`FN/(FN+TP)` = 1-Recall), plus `red_threat_FAR`/`red_threat_MR` aggregates restricted to `RED_THREATS` classes — the highest-consequence figure, since a missed RED target never raises an alarm. Wired into `metrics_report.py` and the dashboard's Calibration tab.
 
 **Module C**: `GradCAMExplainer` requires `pytorch-grad-cam`; the inline `_eigen_cam` helper in Module D is gradient-free and ~5–10× faster — prefer it for real-time use. `MCDropoutWrapper.forward()` returns `{mean_probs, uncertainty, all_probs}`.
 
-**Config / taxonomy**: `REATS/config/__init__.py` loads `targets.yaml` and exports `CLASSES, NUM_CLASSES, TARGET_META, THREAT_COLOR_BGR, RED_THREATS, ORANGE_THREATS, YELLOW_THREATS`. All modules import from here — never hardcode class names or counts.
+**Config / taxonomy**: `REATS/config/__init__.py` loads `targets.yaml` and exports `CLASSES, NUM_CLASSES, TARGET_META, THREAT_COLOR_BGR, RED_THREATS, ORANGE_THREATS, YELLOW_THREATS, OPERATIONAL_POLICY`. All modules import from here — never hardcode class names, counts, or policy thresholds.
 
 ### Ingestion pipeline
 
@@ -202,6 +227,8 @@ Force-adding `.gitkeep` files requires `git add -f`; ordinary `git add` will ign
 | FPS | ≥ 20 |
 
 Single ConvNeXt_tiny achieves ~90.25%; the 6-model softmax ensemble pushes to ~92%. Latency and FPS targets require GPU — CPU numbers are for architecture validation only.
+
+The paper gives no FAR/MR target — these are the professor's additional battlefield-threat-analysis requirement (see `modules/threat_metrics.py`), reported alongside the paper's metrics but not scored against a pass/fail threshold.
 
 ---
 

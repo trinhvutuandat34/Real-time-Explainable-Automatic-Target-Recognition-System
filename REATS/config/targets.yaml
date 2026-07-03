@@ -348,3 +348,22 @@ classes:
     category: surface_combatant
     threat_level: RED
     color_bgr: [0, 20, 220]
+
+# ============================================================
+# CMS operational policy — confidence-threshold → tactical action mapping
+# ============================================================
+# Maps classifier confidence to the CMS code-of-conduct action tier
+# (Warning / Track / Engagement). Engagement-eligible authority is reserved
+# for RED-threat classes: a false engagement recommendation is the costliest
+# failure mode, so ORANGE/YELLOW targets cap out at a lower tier regardless
+# of confidence. See modules/threat_policy.py for the lookup logic.
+
+operational_policy:
+  confidence_thresholds:
+    WARNING: 0.50      # operator alert only — log + display, no tasking
+    TRACK: 0.75         # cue sensors, maintain track — no engagement authority
+    ENGAGEMENT: 0.90     # engagement-eligible — requires operator confirmation per ROE
+  threat_level_ceiling:
+    RED: ENGAGEMENT
+    ORANGE: TRACK
+    YELLOW: WARNING
