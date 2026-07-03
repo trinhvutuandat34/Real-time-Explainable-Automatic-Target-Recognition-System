@@ -32,15 +32,31 @@ FLIR_Thermal:
 FLIR_ADAS_v2:
   thermal: true
   labels:
+    # Teledyne FLIR ADAS v2 uses short COCO names (bike/motor/…), not the
+    # long forms. Normalised lookup also folds 'other vehicle' → other_vehicle.
     person:          null
+    people:          null
     car:             BTR80
+    bike:            null
     bicycle:         null
+    motor:           null
     motorcycle:      null
     bus:             M109
     truck:           M109
+    train:           null
+    light:           null
     trafficlight:    null
+    hydrant:         null
+    sign:            null
     trafficsign:     null
+    dog:             null
+    deer:            null
+    skateboard:      null
+    stroller:        null
+    scooter:         null
+    monorail:        null
     other vehicle:   M109
+    other_vehicle:   M109
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HIT-UAV: High-altitude Infrared Thermal  (YOLO txt, thermal, UAV top-down)

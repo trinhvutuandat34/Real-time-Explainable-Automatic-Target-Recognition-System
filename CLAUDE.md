@@ -144,9 +144,11 @@ IR Frame
 ### Ingestion pipeline
 
 `REATS/ingestion/` handles raw dataset → REATS split conversion:
-- `formats.py` — parsers for COCO JSON, YOLO txt, Pascal VOC XML, CSV, folder-per-class, and video (frame-sampled)
-- `label_maps.yaml` — maps every source dataset's raw labels to REATS class IDs (supports `__size_rule__` for area-based disambiguation)
-- `pipeline.py` — orchestrates parsers + label resolution + `preprocessor.py` patch extraction + stratified train/val/test split
+- `formats.py` — parsers for COCO JSON, YOLO txt, Pascal VOC XML, CSV, folder-per-class, and video (frame-sampled). `parse_xml` handles both VOC `<bndbox>` and HRSC coords stored directly on the object element; it uses explicit `is not None` element checks (never `find(a) or find(b)` — a childless ET element is falsy, which silently zeroed VOC/HRSC parsing).
+- `label_maps.yaml` — maps every source dataset's raw labels to REATS class IDs (supports `__size_rule__` for area-based disambiguation). Lookup is normalised (lowercase, `-`/space → `_`), so `"Other Vehicle"` matches `other_vehicle`.
+- `pipeline.py` — orchestrates parsers + label resolution + `preprocessor.py` patch extraction + stratified train/val/test split. `_resolve_label` returns `(class_id, matched)`; the run prints an **UNMAPPED** report per dataset listing raw labels with no map entry (the fix-list for `label_maps.yaml`). Writes `data/provenance.json`.
+
+**Data provenance (`data/provenance.json`)**: every generated image is tagged `real` (genuine annotated IR pixels, written by the pipeline), `remapped` (real FLIR ROI intensity-remapped, from `generate_flir_fallback.py --mode crop`), or `synthetic` (procedural target). The notebook's provenance cell splits test accuracy by bucket: `real_backed` classes are field-relevant, `synthetic_only` classes are **architecture validation only**. Most classes are currently synthetic-only, so the headline accuracy is an architecture-validation number until label-map coverage grows.
 
 ---
 
