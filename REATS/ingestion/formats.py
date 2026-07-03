@@ -22,17 +22,29 @@ def _img_exts():
     return {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
 
+# Memo: {resolved root: cache}. Several parsers scan the same root
+# (HIT_UAV_v2 runs 4 COCO files over one tree; the YOLO fallback loops
+# over multiple labels/ dirs) — without this each call re-walks the
+# entire dataset.
+_IMG_CACHE_MEMO: dict[str, dict] = {}
+
+
 def _build_img_cache(root: Path) -> dict[str, Path]:
     """
     Scan root once and return {stem: path} for O(1) image lookups.
     This replaces per-annotation rglob calls which are catastrophically slow
     on large datasets (FLIR_Thermal: 100k+ annotations × rglob = hours).
     """
+    key = str(root.resolve())
+    hit = _IMG_CACHE_MEMO.get(key)
+    if hit is not None:
+        return hit
     cache: dict[str, Path] = {}
     exts = _img_exts()
     for p in root.rglob("*"):
         if p.is_file() and p.suffix.lower() in exts:
             cache.setdefault(p.stem, p)
+    _IMG_CACHE_MEMO[key] = cache
     return cache
 
 
@@ -132,10 +144,9 @@ def parse_yolo(
     class_names: list[str],
 ) -> list[dict]:
     """Parse YOLO txt annotations (normalised cx,cy,w,h)."""
-    import cv2
+    from PIL import Image
 
     results   = []
-    exts      = _img_exts()
     img_cache = _build_img_cache(img_root)
 
     for txt_path in sorted(label_root.rglob("*.txt")):
@@ -144,10 +155,13 @@ def parse_yolo(
         if ipath is None:
             continue
 
-        img = cv2.imread(str(ipath), cv2.IMREAD_UNCHANGED)
-        if img is None:
+        # PIL reads only the header for .size — never cv2.imread here, a
+        # full pixel decode per file makes large YOLO sets take minutes.
+        try:
+            with Image.open(ipath) as im:
+                iw, ih = im.size
+        except Exception:
             continue
-        ih, iw = img.shape[:2]
 
         for line in txt_path.read_text().splitlines():
             parts = line.strip().split()
@@ -219,8 +233,10 @@ def parse_xml(
 
         ipath = _find_image(img_root, fname, cache=img_cache)
         if ipath is None:
-            # Try xml_root parent as fallback
-            ipath = _find_image(xml_path.parent, fname)
+            # Try the xml's own directory — cached, or a recursive glob
+            # fires per XML file (O(N²) on HRSC-sized annotation sets)
+            ipath = _find_image(xml_path.parent, fname,
+                                cache=_build_img_cache(xml_path.parent))
         if ipath is None:
             continue
 
