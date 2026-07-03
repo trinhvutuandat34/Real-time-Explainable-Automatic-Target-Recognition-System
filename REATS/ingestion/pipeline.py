@@ -28,7 +28,7 @@ from __future__ import annotations
 import argparse
 import random
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import yaml
@@ -54,29 +54,54 @@ def _load_label_maps() -> dict:
         return yaml.safe_load(f)
 
 
+def _norm_label(s: str) -> str:
+    """Normalise a raw label for map lookup: lowercase, strip, unify separators."""
+    return str(s).strip().lower().replace("-", "_").replace(" ", "_")
+
+
 def _resolve_label(
     raw_label: str,
     dataset_cfg: dict,
     area: float,
-) -> str | None:
+) -> tuple[str | None, bool]:
     """
-    Resolve a source label to a REATS class ID, or None to discard.
-    Handles both direct mappings and size_rule mappings.
+    Resolve a source label to a REATS class ID.
+
+    Returns (class_id | None, matched):
+      matched=False → the raw label has no entry in the dataset's label map
+                      (a candidate for a label_maps.yaml fix — report it!)
+      matched=True, class None → explicit null mapping (intentional discard)
     """
-    label_map = dataset_cfg.get("labels", {})
+    label_map  = dataset_cfg.get("labels", {}) or {}
     size_rules = dataset_cfg.get("size_rules", [])
 
-    mapped = label_map.get(raw_label) or label_map.get(raw_label.lower())
+    key = None
+    if raw_label in label_map:
+        key = raw_label
+    elif raw_label.lower() in label_map:
+        key = raw_label.lower()
+    else:
+        # Normalised lookup: 'Other Vehicle' / 'other-vehicle' → 'other_vehicle'
+        norm_map = dataset_cfg.get("_norm_cache")
+        if norm_map is None:
+            norm_map = {_norm_label(k): k for k in label_map}
+            dataset_cfg["_norm_cache"] = norm_map
+        key = norm_map.get(_norm_label(raw_label))
+
+    if key is None:
+        return None, False
+
+    mapped = label_map[key]
     if mapped is None:
-        return None
+        return None, True
     if mapped == "__size_rule__":
         for rule in size_rules:
             if "max_area_px" not in rule:
-                return rule.get("class")
+                return rule.get("class"), True
             if area <= rule["max_area_px"]:
-                return rule.get("class")
-        return None
-    return mapped   # direct class ID
+                return rule.get("class"), True
+        return None, True
+    return mapped, True   # direct class ID
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +263,8 @@ def _autodetect_annotations(
     # ── 3. COCO JSON: any JSON with annotation/train/val in name ────────
     for jf in sorted(dataset_root.rglob("*.json")):
         name = jf.name.lower()
-        if not any(k in name for k in ("annotation", "train", "val", "test", "instance")):
+        if not any(k in name for k in ("annotation", "train", "val", "test",
+                                       "instance", "coco")):
             continue
         try:
             parent   = jf.parent
@@ -297,7 +323,8 @@ def load_dataset_annotations(
                 annotations += parse_coco(ann_path, img_root)
             else:
                 for cand in dataset_root.rglob("*.json"):
-                    if "annotation" in cand.name.lower() or "train" in cand.name or "val" in cand.name:
+                    cname = cand.name.lower()
+                    if any(k in cname for k in ("annotation", "train", "val", "coco")):
                         try:
                             annotations += parse_coco(cand, dataset_root)
                             break
@@ -430,19 +457,32 @@ class IngestPipeline:
                 continue
             print(f"           → {len(anns)} raw annotations")
 
-            mapped = 0
+            mapped = discarded = capped = 0
+            unmapped: Counter = Counter()
             for ann in anns:
-                cls_id = _resolve_label(ann["label"], ds_cfg, ann.get("area", 0))
+                cls_id, matched = _resolve_label(ann["label"], ds_cfg, ann.get("area", 0))
+                if not matched:
+                    unmapped[ann["label"]] += 1
+                    continue
                 if cls_id is None or cls_id not in CLASSES:
+                    discarded += 1
                     continue
                 if len(by_class[cls_id]) >= pool_cap:
-                    continue   # already have enough for this class
+                    capped += 1   # mapped fine — pool for this class is already full
+                    continue
                 ann["_class"]    = cls_id
                 ann["_thermal"]  = is_thermal
                 ann["_dataset"]  = ds_key
                 by_class[cls_id].append(ann)
                 mapped += 1
-            print(f"           → {mapped} mapped to taxonomy")
+            print(f"           → {mapped} mapped, {discarded} null-discarded, "
+                  f"{capped} pool-capped")
+            if unmapped:
+                top = ", ".join(f"'{lbl}'×{n}" for lbl, n in unmapped.most_common(8))
+                print(f"           → UNMAPPED ({sum(unmapped.values())} anns, "
+                      f"{len(unmapped)} distinct): {top}")
+                print(f"             fix: add these labels to ingestion/label_maps.yaml "
+                      f"under {ds_key}")
 
         return by_class
 
@@ -532,7 +572,36 @@ class IngestPipeline:
             print(f"    {split:<6}  {n}")
         print(f"    {'TOTAL':<6}  {total}")
         print(f"{'='*W}\n")
+
+        if not dry_run and total > 0:
+            self._update_provenance(written)
         return written
+
+    # ------------------------------------------------------------------
+
+    def _update_provenance(self, written: dict) -> None:
+        """
+        Merge this run's per-class counts into out_root/provenance.json as
+        'real' images. generate_flir_fallback.py adds 'remapped'/'synthetic'
+        counts to the same file, so downstream evaluation can report metrics
+        per data-provenance bucket (architecture validation vs field-relevant).
+        """
+        import json
+        path = self.out_root / "provenance.json"
+        prov: dict = {}
+        if path.exists():
+            try:
+                prov = json.loads(path.read_text())
+            except Exception:
+                prov = {}
+        for class_counts in written.values():
+            for cls, n in class_counts.items():
+                if n:
+                    entry = prov.setdefault(cls, {})
+                    entry["real"] = entry.get("real", 0) + n
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(prov, indent=2, sort_keys=True))
+        print(f"  Provenance manifest updated: {path}")
 
 
 # ---------------------------------------------------------------------------

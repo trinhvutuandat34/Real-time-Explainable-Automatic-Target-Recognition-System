@@ -5,6 +5,7 @@ import sys
 import time
 import zipfile
 import csv
+import json
 
 import cv2
 import numpy as np
@@ -625,7 +626,19 @@ def _tab_calibration():
     )
     zip_file = st.file_uploader("Upload test-set ZIP", type=["zip"], key="cal_upload")
 
-    T_scale = st.slider("Temperature scaling T", 0.5, 3.0, 1.0, 0.1)
+    # Default the slider to the temperature fitted during training, if present
+    # (saved as checkpoints/temperature.json by the calibration step). Falls
+    # back to 1.0 (no scaling) when no fitted value is available.
+    _fitted_T = 1.0
+    _temp_path = Path("checkpoints/temperature.json")
+    if _temp_path.exists():
+        try:
+            _fitted_T = float(json.loads(_temp_path.read_text()).get("temperature", 1.0))
+            _fitted_T = min(3.0, max(0.5, _fitted_T))  # clamp to slider range
+            st.caption(f"Loaded fitted temperature T={_fitted_T:.2f} from `{_temp_path}`")
+        except Exception:
+            pass
+    T_scale = st.slider("Temperature scaling T", 0.5, 3.0, _fitted_T, 0.1)
 
     if zip_file is None:
         st.info("Upload a test-set ZIP to compute calibration metrics.")

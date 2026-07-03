@@ -52,8 +52,12 @@ from PIL import Image
 import sys as _sys
 from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).parent))
-from config import CLASSES, NUM_CLASSES
+from config import CLASSES, NUM_CLASSES, TARGET_META
 from ingestion.preprocessor import _CLASS_THERMAL as _THERMAL
+
+
+def _domain_of(cls: str) -> str:
+    return TARGET_META.get(cls, {}).get("domain", "GROUND")
 
 SPLITS  = ["train", "val", "test"]
 TARGETS = {"train": 170, "val": 30, "test": 200}
@@ -177,6 +181,35 @@ def _save(patch: np.ndarray, dst: Path, dry_run: bool) -> None:
     cv2.imwrite(str(dst), rgb)
 
 
+def _merge_provenance(data_root: Path, per_cls: dict, bucket: str,
+                      dry_run: bool) -> None:
+    """Record generated image counts by data-provenance bucket.
+
+    Shares data/provenance.json with the ingestion pipeline (which writes
+    the 'real' bucket). Buckets:
+      real      — genuine target pixels from an annotated dataset
+      remapped  — real FLIR ROI, intensity-remapped to a class signature
+      synthetic — procedurally generated target (blob/shape composite)
+    Downstream evaluation reads this to report metrics per provenance —
+    'real' accuracy is field-relevant; 'synthetic' is architecture validation.
+    """
+    if dry_run or not per_cls:
+        return
+    path = data_root / "provenance.json"
+    prov: dict = {}
+    if path.exists():
+        try:
+            prov = json.loads(path.read_text())
+        except Exception:
+            prov = {}
+    for cls, n in per_cls.items():
+        if n:
+            entry = prov.setdefault(cls, {})
+            entry[bucket] = entry.get(bucket, 0) + int(n)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(prov, indent=2, sort_keys=True))
+
+
 # ---------------------------------------------------------------------------
 # Intensity remapping
 # ---------------------------------------------------------------------------
@@ -196,33 +229,93 @@ def intensity_remap(gray: np.ndarray, target_mean: float, target_std: float,
 # Blob overlay (synthetic target on real/synthetic background)
 # ---------------------------------------------------------------------------
 
-def _make_blob(cls: str, rng: np.random.Generator) -> np.ndarray:
-    """Generate a hot target blob (H×W) matching class thermal profile."""
-    h, w = _BLOB_HW[cls]
+def _silhouette(cls: str, h: int, w: int, rng: np.random.Generator) -> np.ndarray:
+    """Soft [0,1] silhouette mask shaped by domain (top-down view).
+
+    A shaped mask means the classifier must key on *structure*, not just a
+    bright rectangle of the right aspect ratio — which is what made the old
+    synthetic set trivially separable and inflated the accuracy number.
+    """
+    dom    = _domain_of(cls)
+    yy, xx = np.ogrid[:h, :w]
+    cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
+    ny = (yy - cy) / (h / 2.0 + 1e-6)          # (h,1) in ~[-1,1]
+    nx = (xx - cx) / (w / 2.0 + 1e-6)          # (1,w) in ~[-1,1]
+
+    if dom == "AIR":
+        # fuselage (thin, long) + wings (thin, wide) → cross/plus footprint
+        fuse = (np.abs(nx) < 0.22) & (np.abs(ny) < 0.98)
+        wing = (np.abs(ny) < 0.24) & (np.abs(nx) < 0.98)
+        mask = (fuse | wing).astype(np.float32)
+    elif dom == "NAVAL":
+        # elongated hull with a tapered bow (narrower toward +x)
+        taper = 0.45 * (1.0 - 0.55 * np.clip(nx, 0.0, 1.0))
+        mask  = ((nx ** 2) + (ny / (taper + 1e-3)) ** 2 < 1.0).astype(np.float32)
+    else:  # GROUND — boxy, rounded corners (super-ellipse)
+        mask = ((np.abs(nx) ** 4 + np.abs(ny) ** 4) < 1.0).astype(np.float32)
+
+    mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=max(h, w) / 22.0)
+    return mask / (mask.max() + 1e-6)
+
+
+def _apply_hotspots(body: np.ndarray, cls: str, rng: np.random.Generator) -> np.ndarray:
+    """Add engine/exhaust hot-spots — IR targets are not uniformly warm."""
+    h, w   = body.shape
+    dom    = _domain_of(cls)
+    n_spot = {"AIR": 2, "NAVAL": 1, "GROUND": 1}.get(dom, 1)
+    yy, xx = np.ogrid[:h, :w]
+    for _ in range(n_spot):
+        hy = int(rng.integers(int(0.2 * h), int(0.8 * h) + 1))
+        hx = int(rng.integers(int(0.2 * w), int(0.8 * w) + 1))
+        r  = max(2.0, min(h, w) * 0.16)
+        g  = np.exp(-(((yy - hy) ** 2 + (xx - hx) ** 2) / (2.0 * r * r)))
+        body = body + g.astype(np.float32) * float(rng.uniform(25, 55))
+    return body
+
+
+def _make_target(cls: str, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+    """Return (body HxW float32, mask HxW float32) — an oriented IR target."""
+    h, w      = _BLOB_HW[cls]
     mean, std = _THERMAL[cls]
-    # Gaussian blob with slight noise
-    blob = rng.normal(mean, std, (h, w)).clip(0, 255).astype(np.uint8)
-    # Soft edges via Gaussian blur
-    ksize = max(3, min(h, w) // 3 | 1)
-    blob = cv2.GaussianBlur(blob, (ksize, ksize), 0)
-    return blob
+    grad = np.linspace(-0.5, 0.5, w, dtype=np.float32)[None, :] * std * 0.6
+    body = rng.normal(mean, std * 0.5, (h, w)).astype(np.float32) + grad
+    body = _apply_hotspots(body, cls, rng)
+    return body, _silhouette(cls, h, w, rng)
 
 
 def add_blob(background: np.ndarray, cls: str,
              rng: np.random.Generator) -> np.ndarray:
-    """Paste a synthetic target blob onto a 224×224 greyscale background."""
-    out = background.astype(np.float32)
-    bh, bw = _BLOB_HW[cls]
-    max_y = IMG_SIZE - bh
-    max_x = IMG_SIZE - bw
-    if max_y <= 0 or max_x <= 0:
-        return background.copy()
-    y = int(rng.integers(max_y // 4, max(max_y // 4 + 1, 3 * max_y // 4)))
-    x = int(rng.integers(max_x // 4, max(max_x // 4 + 1, 3 * max_x // 4)))
-    blob = _make_blob(cls, rng).astype(np.float32)
-    # Alpha blend: blob dominates centre, fades at edges
-    alpha = np.ones((bh, bw), np.float32) * 0.85
-    out[y:y+bh, x:x+bw] = alpha * blob + (1 - alpha) * out[y:y+bh, x:x+bw]
+    """Composite a shaped, randomly-oriented IR target onto a 224×224 background."""
+    out        = background.astype(np.float32)
+    body, mask = _make_target(cls, rng)
+    bh, bw     = body.shape
+
+    # Place body+mask on a square canvas, then rotate to a random heading
+    S  = int(np.ceil(np.hypot(bh, bw))) + 2
+    cb = np.zeros((S, S), np.float32)
+    cm = np.zeros((S, S), np.float32)
+    y0, x0 = (S - bh) // 2, (S - bw) // 2
+    cb[y0:y0 + bh, x0:x0 + bw] = body
+    cm[y0:y0 + bh, x0:x0 + bw] = mask
+
+    ang = float(rng.uniform(0, 360))
+    M   = cv2.getRotationMatrix2D((S / 2.0, S / 2.0), ang, 1.0)
+    cb  = cv2.warpAffine(cb, M, (S, S), flags=cv2.INTER_LINEAR, borderValue=0.0)
+    cm  = cv2.warpAffine(cm, M, (S, S), flags=cv2.INTER_LINEAR, borderValue=0.0)
+
+    # Shrink to fit if the rotated target is larger than the patch
+    if S > IMG_SIZE:
+        cb = cv2.resize(cb, (IMG_SIZE, IMG_SIZE))
+        cm = cv2.resize(cm, (IMG_SIZE, IMG_SIZE))
+        S  = IMG_SIZE
+
+    max_y, max_x = IMG_SIZE - S, IMG_SIZE - S
+    y = int(rng.integers(0, max_y + 1)) if max_y > 0 else 0
+    x = int(rng.integers(0, max_x + 1)) if max_x > 0 else 0
+
+    a      = np.clip(cm, 0.0, 1.0)
+    region = out[y:y + S, x:x + S]
+    out[y:y + S, x:x + S] = a * cb + (1.0 - a) * region
     return out.clip(0, 255).astype(np.uint8)
 
 
@@ -231,14 +324,24 @@ def add_blob(background: np.ndarray, cls: str,
 # ---------------------------------------------------------------------------
 
 def _synth_background(cls: str, rng: np.random.Generator) -> np.ndarray:
-    """Generate a plausible IR background for the given class."""
-    bg_mean = max(60, _THERMAL[cls][0] - 80)
-    bg_std  = 15
-    bg = rng.normal(bg_mean, bg_std, (IMG_SIZE, IMG_SIZE)).clip(0, 255).astype(np.uint8)
-    # Add low-freq texture via blur + subtract sharpened version
-    blurred = cv2.GaussianBlur(bg.astype(np.float32), (21, 21), 0)
-    texture = bg.astype(np.float32) * 0.6 + blurred * 0.4
-    return texture.clip(0, 255).astype(np.uint8)
+    """Generate a plausible IR background with low-freq texture and clutter.
+
+    The clutter decoys (faint warm blobs, cooler than the real target) stop
+    the classifier from cheating with a pure brightness threshold, so the
+    synthetic accuracy better reflects genuine shape discrimination.
+    """
+    bg_mean = max(50, _THERMAL[cls][0] - 90)
+    bg      = rng.normal(bg_mean, 16, (IMG_SIZE, IMG_SIZE)).astype(np.float32)
+    bg      = 0.6 * bg + 0.4 * cv2.GaussianBlur(bg, (21, 21), 0)
+
+    yy, xx = np.ogrid[:IMG_SIZE, :IMG_SIZE]
+    for _ in range(int(rng.integers(0, 4))):        # 0–3 decoys
+        ry = int(rng.integers(0, IMG_SIZE))
+        rx = int(rng.integers(0, IMG_SIZE))
+        r  = float(rng.integers(6, 20))
+        g  = np.exp(-(((yy - ry) ** 2 + (xx - rx) ** 2) / (2.0 * r * r)))
+        bg = bg + g.astype(np.float32) * float(rng.uniform(15, 40))
+    return bg.clip(0, 255).astype(np.uint8)
 
 
 def generate_synth_patch(cls: str, rng: np.random.Generator) -> np.ndarray:
@@ -306,6 +409,7 @@ def generate_crop_mode(
 ) -> int:
     """Crop FLIR bboxes, intensity-remap, resize to 224×224, save."""
     total = 0
+    per_cls: dict = defaultdict(int)
     flir_splits = [("train", "train"), ("val", "val")]
 
     # Build pool: {reats_class: [(flir_path, x, y, w, h), ...]}
@@ -390,6 +494,7 @@ def generate_crop_mode(
                     idx += 1
                     generated += 1
                     total += 1
+                    per_cls[cls] += 1
                 except Exception:
                     continue
 
@@ -397,7 +502,7 @@ def generate_crop_mode(
                 verb = "Would generate" if dry_run else "Generated"
                 print(f"  [crop] {split}/{cls}: {verb} {generated}/{n}")
 
-    return total
+    return total, per_cls
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +519,7 @@ def generate_background_mode(
 ) -> int:
     """Use FLIR images as backgrounds (or synth if no FLIR), add target blob."""
     total = 0
+    per_cls: dict = defaultdict(int)
 
     # Collect background images
     bg_pool: list[Path] = []
@@ -467,6 +573,7 @@ def generate_background_mode(
                     idx += 1
                     generated += 1
                     total += 1
+                    per_cls[cls] += 1
                 except Exception:
                     continue
 
@@ -474,7 +581,7 @@ def generate_background_mode(
                 verb = "Would generate" if dry_run else "Generated"
                 print(f"  [bg ] {split}/{cls}: {verb} {generated}/{n}")
 
-    return total
+    return total, per_cls
 
 
 # ---------------------------------------------------------------------------
@@ -490,6 +597,7 @@ def generate_synth_only(
 ) -> int:
     """Pure synthetic IR patches, no FLIR required."""
     total = 0
+    per_cls: dict = defaultdict(int)
     for split in SPLITS:
         for cls in CLASSES:
             n = need[split].get(cls, 0)
@@ -502,10 +610,11 @@ def generate_synth_only(
                 _save(patch, dst, dry_run)
                 idx += 1
                 total += 1
+                per_cls[cls] += 1
             if verbose:
                 verb = "Would generate" if dry_run else "Generated"
                 print(f"  [synth] {split}/{cls}: {verb} {n}")
-    return total
+    return total, per_cls
 
 
 # ---------------------------------------------------------------------------
@@ -618,32 +727,41 @@ Kaggle download:
     total_generated = 0
 
     if args.mode == "synth-only":
-        total_generated += generate_synth_only(data_root, need, rng,
-                                               args.dry_run, verbose)
+        n, pc = generate_synth_only(data_root, need, rng, args.dry_run, verbose)
+        total_generated += n
+        _merge_provenance(data_root, pc, "synthetic", args.dry_run)
 
     elif args.mode == "crop":
-        total_generated += generate_crop_mode(flir_root, data_root, need, rng,
-                                              args.dry_run, verbose)
+        n, pc = generate_crop_mode(flir_root, data_root, need, rng,
+                                   args.dry_run, verbose)
+        total_generated += n
+        _merge_provenance(data_root, pc, "remapped", args.dry_run)
 
     elif args.mode == "background":
-        total_generated += generate_background_mode(flir_root, data_root, need, rng,
-                                                    args.dry_run, verbose)
+        n, pc = generate_background_mode(flir_root, data_root, need, rng,
+                                         args.dry_run, verbose)
+        total_generated += n
+        _merge_provenance(data_root, pc, "synthetic", args.dry_run)
 
     elif args.mode == "both":
-        # Pass 1: crop mode
+        # Pass 1: crop mode (real FLIR ROI → 'remapped' provenance)
         print("\n  Pass 1/2 — crop mode")
-        total_generated += generate_crop_mode(flir_root, data_root, need, rng,
-                                              args.dry_run, verbose)
+        n, pc = generate_crop_mode(flir_root, data_root, need, rng,
+                                   args.dry_run, verbose)
+        total_generated += n
+        _merge_provenance(data_root, pc, "remapped", args.dry_run)
         # Recalculate shortfall
         if not args.dry_run:
             existing = _count_existing(data_root)
             need     = _shortfall(existing)
-        # Pass 2: background mode fills the rest
+        # Pass 2: background mode fills the rest ('synthetic' provenance)
         remaining = sum(n for s in need.values() for n in s.values())
         if remaining:
             print(f"\n  Pass 2/2 — background mode ({remaining} still needed)")
-            total_generated += generate_background_mode(flir_root, data_root, need, rng,
-                                                        args.dry_run, verbose)
+            n, pc = generate_background_mode(flir_root, data_root, need, rng,
+                                             args.dry_run, verbose)
+            total_generated += n
+            _merge_provenance(data_root, pc, "synthetic", args.dry_run)
 
     verb = "Would generate" if args.dry_run else "Generated"
     print(f"\n{'='*W}")

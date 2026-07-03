@@ -172,6 +172,21 @@ def parse_yolo(
 # Pascal VOC XML  (HRSC2016 variant)
 # ---------------------------------------------------------------------------
 
+def _find_first(parent, *tags):
+    """First existing child element among tags, by explicit None check.
+
+    NEVER use `find(a) or find(b)` — an ET Element with no children is
+    FALSY, so a leaf tag like <name>ship</name> evaluates False and the
+    chain silently falls through. This bug made every VOC dataset parse
+    zero objects.
+    """
+    for tag in tags:
+        el = parent.find(tag)
+        if el is not None:
+            return el
+    return None
+
+
 def parse_xml(
     xml_root: Path,
     img_root: Path,
@@ -211,30 +226,39 @@ def parse_xml(
         )
         for obj in objects:
             # Label
-            name_el = obj.find("name") or obj.find("Class_ID")
+            name_el = _find_first(obj, "name", "Class_ID", "n")
             if name_el is None or not name_el.text:
                 continue
             label = name_el.text.strip()
 
-            # Bbox — handles VOC <bndbox>, HRSC <box> (lowercase), and <Box>
-            bnd = obj.find("bndbox") or obj.find("box") or obj.find("Box")
-            if bnd is None:
+            # Bbox — VOC <bndbox>, HRSC <box>/<Box>; HRSC also puts
+            # box_xmin/... directly on the object element itself.
+            bnd    = _find_first(obj, "bndbox", "box", "Box")
+            coords = bnd if bnd is not None else obj
+
+            def _coord(*names) -> float | None:
+                for n in names:
+                    t = coords.findtext(n)
+                    if t is not None and t.strip():
+                        try:
+                            return float(t)
+                        except ValueError:
+                            return None
+                return None
+
+            x1f = _coord("xmin", "box_xmin", "x")
+            y1f = _coord("ymin", "box_ymin", "y")
+            x2f = _coord("xmax", "box_xmax")
+            y2f = _coord("ymax", "box_ymax")
+            if x2f is None or y2f is None:
+                wf = _coord("w", "width")
+                hf = _coord("h", "height")
+                if None in (x1f, y1f, wf, hf):
+                    continue
+                x2f, y2f = x1f + wf, y1f + hf
+            if None in (x1f, y1f, x2f, y2f):
                 continue
-            try:
-                x1 = int(float(
-                    bnd.findtext("xmin") or bnd.findtext("box_xmin")
-                    or bnd.findtext("x") or 0))
-                y1 = int(float(
-                    bnd.findtext("ymin") or bnd.findtext("box_ymin")
-                    or bnd.findtext("y") or 0))
-                x2 = int(float(
-                    bnd.findtext("xmax") or bnd.findtext("box_xmax") or "0")
-                    or float(bnd.findtext("x") or 0) + float(bnd.findtext("w") or 0))
-                y2 = int(float(
-                    bnd.findtext("ymax") or bnd.findtext("box_ymax") or "0")
-                    or float(bnd.findtext("y") or 0) + float(bnd.findtext("h") or 0))
-            except (TypeError, ValueError):
-                continue
+            x1, y1, x2, y2 = int(x1f), int(y1f), int(x2f), int(y2f)
             if x2 <= x1 or y2 <= y1:
                 continue
             results.append({
