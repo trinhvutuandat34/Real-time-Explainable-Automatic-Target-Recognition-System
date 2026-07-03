@@ -83,27 +83,26 @@ def _make_val_loader(data_root: str, batch_size: int = 32) -> DataLoader | None:
     return DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=2)
 
 
-def measure_accuracy_ece(model, loader, device, is_probs: bool) -> tuple[float, float]:
-    from modules.module_b_classifier import compute_ece
-    from torch.nn import CrossEntropyLoss
-    from modules.module_b_classifier import evaluate
-    model.eval()
-    if hasattr(model, "models"):
-        # EnsembleClassifier: evaluate needs logits, not probs
-        correct = total = 0
-        with torch.no_grad():
-            for imgs, labels in loader:
-                imgs   = imgs.to(device)
-                labels = labels.to(device)
-                probs  = model(imgs)      # already softmaxed by EnsembleClassifier
-                correct += (probs.argmax(1) == labels).sum().item()
-                total   += imgs.size(0)
-        acc = correct / max(total, 1)
-    else:
-        _, acc = evaluate(model, loader, CrossEntropyLoss(), device)
+def collect_predictions(model, loader, device, is_probs: bool):
+    """Single inference pass over `loader`; returns (confidences, preds, labels) arrays.
 
-    ece = compute_ece(model, loader, device, is_probs=is_probs)
-    return acc, ece
+    Accuracy, ECE, and FAR/MR are all derived from this one pass — previously each
+    metric re-ran the full val set (3 passes; 3 × 6 forward passes for the ensemble).
+    """
+    model.eval()
+    confs, preds, labels_all = [], [], []
+    with torch.no_grad():
+        for imgs, labels in loader:
+            imgs = imgs.to(device)
+            out  = model(imgs)
+            probs = out if is_probs else torch.softmax(out, dim=-1)
+            conf, pred = probs.max(dim=-1)
+            confs.append(conf.cpu().numpy())
+            preds.append(pred.cpu().numpy())
+            labels_all.append(labels.numpy())
+    if not confs:
+        return np.array([]), np.array([]), np.array([])
+    return np.concatenate(confs), np.concatenate(preds), np.concatenate(labels_all)
 
 
 def measure_faithfulness(model, loader, device, n_samples: int = 20) -> float:
@@ -226,13 +225,16 @@ def main():
 
         if val_loader:
             print("[Accuracy + ECE]")
-            acc, ece = measure_accuracy_ece(model, val_loader, device, is_probs=is_ensemble)
+            from modules.module_b_classifier import ece_from_arrays
+            confs, preds, labels = collect_predictions(model, val_loader, device, is_probs=is_ensemble)
+            acc = float((preds == labels).mean()) if len(labels) else 0.0
+            ece = ece_from_arrays(confs, (preds == labels).astype(float))
             print(f"  Accuracy        : {_fmt('accuracy', acc)}")
             print(f"  ECE             : {_fmt('ece', ece)}")
 
             print("\n[Battlefield threat analysis — False Alarm Rate / Miss Rate]")
-            from modules.threat_metrics import far_mr_from_model, format_report
-            far_mr = far_mr_from_model(model, val_loader, device)
+            from modules.threat_metrics import compute_far_mr, format_report
+            far_mr = compute_far_mr(labels.tolist(), preds.tolist())
             print(format_report(far_mr, top_n=10))
             print(
                 "  (FAR = false-alarm rate on civilian/friendly-like misclassification, "

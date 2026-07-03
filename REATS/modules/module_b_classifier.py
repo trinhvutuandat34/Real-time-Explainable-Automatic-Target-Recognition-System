@@ -181,6 +181,20 @@ class EnsembleClassifier(nn.Module):
         return probs.mean(dim=0)
 
 
+def preprocess_roi(roi: np.ndarray, img_size: int = 224, device: str = "cpu") -> torch.Tensor:
+    """BGR or grayscale uint8 ROI → normalized (1, 3, img_size, img_size) float tensor.
+
+    Matches the eval transform in build_loaders (resize → grayscale×3 → [-1, 1])
+    without a PIL round-trip — pure cv2 + tensor ops, so it is cheap enough for the
+    per-detection real-time path in Module D.
+    """
+    import cv2
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if roi.ndim == 3 else roi
+    gray = cv2.resize(gray, (img_size, img_size), interpolation=cv2.INTER_LINEAR)
+    t = torch.from_numpy(gray.astype(np.float32) / 255.0).sub_(0.5).div_(0.5)
+    return t.unsqueeze(0).expand(3, -1, -1).contiguous().unsqueeze(0).to(device)
+
+
 # ---------------------------------------------------------------------------
 # Data loaders
 # ---------------------------------------------------------------------------
@@ -337,6 +351,26 @@ def evaluate(
     return total_loss / len(loader), correct / len(loader.dataset)
 
 
+def ece_from_arrays(conf: np.ndarray, correct: np.ndarray, n_bins: int = 15) -> float:
+    """ECE from per-sample max-confidence and correctness arrays (vectorised binning)."""
+    conf    = np.asarray(conf,    dtype=np.float64)
+    correct = np.asarray(correct, dtype=np.float64)
+    n = len(conf)
+    if n == 0:
+        return 0.0
+    bins = np.linspace(0, 1, n_bins + 1)
+    # Match the historical (lo, hi] binning: right-inclusive edges
+    bin_idx = np.clip(np.searchsorted(bins, conf, side="left") - 1, 0, n_bins - 1)
+    ece = 0.0
+    for b in range(n_bins):
+        mask = bin_idx == b
+        cnt  = int(mask.sum())
+        if cnt == 0:
+            continue
+        ece += abs(conf[mask].mean() - correct[mask].mean()) * cnt / n
+    return float(ece)
+
+
 def compute_ece(
     model: nn.Module,
     loader: DataLoader,
@@ -353,20 +387,12 @@ def compute_ece(
             out = model(imgs)
             probs = out if is_probs else torch.softmax(out, dim=-1)
             conf, pred = probs.max(dim=-1)
-            all_conf.extend(conf.cpu().tolist())
-            all_correct.extend((pred == labels).cpu().tolist())
+            all_conf.append(conf.cpu().numpy())
+            all_correct.append((pred == labels).cpu().numpy())
 
-    bins = np.linspace(0, 1, n_bins + 1)
-    ece  = 0.0
-    n    = len(all_conf)
-    for lo, hi in zip(bins[:-1], bins[1:]):
-        idx = [i for i, c in enumerate(all_conf) if lo < c <= hi]
-        if not idx:
-            continue
-        avg_conf = np.mean([all_conf[i]    for i in idx])
-        avg_acc  = np.mean([all_correct[i] for i in idx])
-        ece += abs(avg_conf - avg_acc) * len(idx) / n
-    return float(ece)
+    if not all_conf:
+        return 0.0
+    return ece_from_arrays(np.concatenate(all_conf), np.concatenate(all_correct), n_bins)
 
 
 # ---------------------------------------------------------------------------

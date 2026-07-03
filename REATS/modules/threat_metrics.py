@@ -81,8 +81,9 @@ def compute_far_mr(
 
 
 def far_mr_from_model(model, loader, device: str) -> Dict:
-    """Run `model` over `loader` and compute FAR/MR. `model` may be a raw classifier
-    (returns logits) or an EnsembleClassifier (returns probabilities already)."""
+    """Run `model` over `loader` and compute FAR/MR. Works for both raw classifiers
+    (logits) and EnsembleClassifier (probabilities) — argmax is softmax-invariant,
+    so no normalisation is needed either way."""
     import torch
 
     model.eval()
@@ -92,8 +93,7 @@ def far_mr_from_model(model, loader, device: str) -> Dict:
         for imgs, labels in loader:
             imgs = imgs.to(device)
             out  = model(imgs)
-            probs = torch.softmax(out, dim=-1) if not hasattr(model, "models") else out
-            all_preds.extend(probs.argmax(1).cpu().tolist())
+            all_preds.extend(out.argmax(1).cpu().tolist())
             all_labels.extend(labels.tolist())
     return compute_far_mr(all_labels, all_preds)
 

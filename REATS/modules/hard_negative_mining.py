@@ -45,6 +45,18 @@ def _confusable_class_indices(groups: List[Set[str]] = CONFUSABLE_GROUPS) -> Set
     return {CLASSES.index(n) for n in names if n in CLASSES}
 
 
+def _labels_without_loading(dataset: Dataset) -> Optional[List[int]]:
+    """Per-sample labels without decoding any image, when the dataset exposes them
+    (ImageFolder: .targets / .samples). Returns None if only __getitem__ can tell."""
+    targets = getattr(dataset, "targets", None)
+    if targets is not None:
+        return [int(t) for t in targets]
+    samples = getattr(dataset, "samples", None)
+    if samples is not None:
+        return [int(lbl) for _, lbl in samples]
+    return None
+
+
 @torch.no_grad()
 def mine_hard_negatives(
     model: nn.Module,
@@ -59,13 +71,30 @@ def mine_hard_negatives(
     A sample (restricted to `confusable_ids` classes, default: CONFUSABLE_GROUPS) is
     a hard negative if the model misclassifies it, or if its softmax top1/top2 margin
     is below `margin_thresh` (the model is unsure, even when it happens to get it right).
+
+    When the dataset exposes labels without image loading (ImageFolder), only the
+    confusable-class subset is ever decoded and forward-passed — for 3 confusable
+    classes out of 43 that skips ~93% of the inference work.
     """
     if confusable_ids is None:
         confusable_ids = _confusable_class_indices()
 
     model.eval()
     model.to(device)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+    # index_map[j] = original dataset index of the j-th sample in iteration order
+    labels_all = _labels_without_loading(dataset) if confusable_ids else None
+    if labels_all is not None:
+        index_map = [i for i, l in enumerate(labels_all) if l in confusable_ids]
+        if not index_map:
+            return []
+        loader = DataLoader(
+            torch.utils.data.Subset(dataset, index_map),
+            batch_size=batch_size, shuffle=False,
+        )
+    else:
+        index_map = list(range(len(dataset)))
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
     hard_indices: List[int] = []
     offset = 0
@@ -84,7 +113,7 @@ def mine_hard_negatives(
             misclassified = int(top1_idx[i]) != true_label
             low_margin = float(margin[i]) < margin_thresh
             if misclassified or low_margin:
-                hard_indices.append(offset + i)
+                hard_indices.append(index_map[offset + i])
         offset += imgs.size(0)
 
     return hard_indices
