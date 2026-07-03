@@ -105,6 +105,11 @@ def parse_coco(
         if len(bbox) < 4:
             continue
         x, y, w, h = bbox[:4]
+        if len(bbox) >= 5:
+            # Rotated-box COCO (e.g. HIT-UAV rotate_json): (xc, yc, w, h, angle).
+            # Convert the centre to a top-left corner or every crop lands
+            # half a box off-target.
+            x, y = x - w / 2.0, y - h / 2.0
         if w < 8 or h < 8:
             continue
         label = cat_map.get(ann.get("category_id"), "")
@@ -289,10 +294,13 @@ def parse_csv(
     results   = []
     img_cache = _build_img_cache(img_root)
 
+    import re
+
     with open(csv_path, newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            fname = row.get(image_col) or row.get("filename") or row.get("image")
+            fname = (row.get(image_col) or row.get("filename")
+                     or row.get("image") or row.get("image_id"))
             if not fname:
                 continue
             ipath = _find_image(img_root, fname, cache=img_cache)
@@ -305,6 +313,15 @@ def parse_csv(
                 y2 = int(float(row.get(y2_col, 0) or 0))
             except (ValueError, TypeError):
                 continue
+            if x2 <= x1 or y2 <= y1:
+                # WKT geometry column (Airbus aircraft sample:
+                # "POLYGON ((x y, x y, ...))") — bbox = envelope of the points
+                geom = row.get("geometry") or row.get("wkt") or ""
+                nums = [float(v) for v in re.findall(r"-?\d+(?:\.\d+)?", geom)]
+                if len(nums) >= 4:
+                    xs, ys = nums[0::2], nums[1::2]
+                    x1, y1 = int(min(xs)), int(min(ys))
+                    x2, y2 = int(max(xs)), int(max(ys))
             if x2 <= x1 or y2 <= y1:
                 continue
             label = (
@@ -382,7 +399,18 @@ def parse_video_folder(
             continue
 
         for vid_path in sorted(cls_dir.rglob("*")):
-            if vid_path.suffix.lower() not in video_exts:
+            suffix = vid_path.suffix.lower()
+            if suffix in _img_exts():
+                # Stray still images alongside the videos (e.g. a reference
+                # .webp in dataset2/fixed_wing) — use as whole-frame samples
+                results.append({
+                    "image_path": vid_path,
+                    "bbox":       None,
+                    "label":      label,
+                    "area":       float("inf"),
+                })
+                continue
+            if suffix not in video_exts:
                 continue
 
             cap      = cv2.VideoCapture(str(vid_path))

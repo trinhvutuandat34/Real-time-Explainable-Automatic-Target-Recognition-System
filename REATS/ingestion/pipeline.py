@@ -156,11 +156,12 @@ _KNOWN_DATASETS: dict[str, dict] = {
         "img_dirs":   ["images"],
         "yolo_classes": ["ship", "wake"],
     },
+    # Airbus aircraft sample (airbusgeo): images/*.jpg + annotations.csv with
+    # image_id + WKT geometry columns (parse_csv extracts the envelope bbox).
     "CGI_Planes": {
-        "format": "yolo",
-        "label_dirs": ["labels"],
-        "img_dirs":   ["images"],
-        "yolo_classes": ["airplane"],
+        "format": "csv",
+        "ann_file": "annotations.csv",
+        "img_root": "images",
     },
     "Airbus_Aircraft": {
         "format": "csv",

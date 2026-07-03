@@ -269,7 +269,7 @@ The pipeline maps `DATASET_INPUTS` dict keys to `label_maps.yaml` entries.
 |-----|--------|-------------|
 | `FLIR_Thermal` | coco | `/kaggle/input/.../FLIR_Thermal/` |
 | `FLIR_ADAS_v2` | coco | `/kaggle/input/.../FLIR_ADAS_v2/` |
-| `HIT_UAV` | yolo | `/kaggle/input/.../HIT_UAV/` |
+| `HIT_UAV` | yolo | `/kaggle/input/datasets/pandrii000/hituav-a-highaltitude-infrared-thermal-dataset` |
 | `HIT_UAV_v2` | coco | `/kaggle/input/datasets/trnhvtunt/dataset1/HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-Dataset-b53106c` |
 | `Dataset2_Folders` | video_folder | `/kaggle/input/datasets/trnhvtunt/dataset2/` |
 | `HRSC2016` | xml | `/kaggle/input/.../HRSC2016/` |
