@@ -322,15 +322,26 @@ def load_dataset_annotations(
             img_root = dataset_root / img_rel
             if ann_path.exists() and img_root.exists():
                 annotations += parse_coco(ann_path, img_root)
-            else:
-                for cand in dataset_root.rglob("*.json"):
-                    cname = cand.name.lower()
-                    if any(k in cname for k in ("annotation", "train", "val", "coco")):
-                        try:
-                            annotations += parse_coco(cand, dataset_root)
-                            break
-                        except Exception:
-                            continue
+        if not annotations:
+            # Configured paths missing — parse every candidate JSON exactly
+            # once. (The old per-missing-path retry parsed the same first
+            # match repeatedly, duplicating annotations and wall time.)
+            seen: set = set()
+            for cand in sorted(dataset_root.rglob("*.json")):
+                cname = cand.name.lower()
+                if not any(k in cname for k in ("annotation", "train", "val", "coco")):
+                    continue
+                key = str(cand.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    got = parse_coco(cand, cand.parent)
+                    if not got:
+                        got = parse_coco(cand, dataset_root)
+                    annotations += got
+                except Exception:
+                    continue
 
     elif fmt == "yolo":
         classes = info.get("yolo_classes", ["object"])
