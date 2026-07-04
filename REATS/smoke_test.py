@@ -300,6 +300,9 @@ def _test_hard_negative_mining():
     import torch.utils.data as tud
 
     assert any({"F16", "MiG19", "MiG21"} <= g for g in CONFUSABLE_GROUPS)
+    # Armored-vehicle clusters added after the 2026-07-04 Kaggle run's confusion matrix
+    assert any({"BMP2", "Bradley", "K21"} <= g for g in CONFUSABLE_GROUPS)
+    assert any({"T72", "T90", "Leopard2"} <= g for g in CONFUSABLE_GROUPS)
 
     class _DummyDS(tud.Dataset):
         def __len__(self): return 8
@@ -323,6 +326,130 @@ def _test_threat_policy_mapping():
     return "RED@0.95→ENGAGEMENT, YELLOW@0.95→WARNING (ceiling), RED@0.10→NONE"
 
 check("threat_policy.map_confidence", _test_threat_policy_mapping)
+
+
+# ---------------------------------------------------------------------------
+# 5c. Module D — dashboard pipeline internals (Grad-CAM batching, ingestion fix)
+# ---------------------------------------------------------------------------
+
+def _test_ingestion_wrapper_dir_descent():
+    """Kaggle run 2026-07-04: SWIM/Ships_Vessels_Aerial/HRSC2016 all read a
+    Kaggle-mirror wrapper directory's name (e.g. 'swim_dataset_1.0.0') as the
+    class label. parse_folder/parse_video_folder must now descend past a
+    media-less wrapper to the real per-class folders, while leaving an
+    already-flat dataset (Vehicle_Dataset-style) unchanged."""
+    import tempfile, shutil
+    from ingestion.formats import parse_folder
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        # Wrapper case: root -> swim_dataset_1.0.0/{ship,wake}/*.jpg
+        d = tmp / "swim_dataset_1.0.0"
+        (d / "ship").mkdir(parents=True)
+        (d / "wake").mkdir(parents=True)
+        (d / "ship" / "a.jpg").write_bytes(b"x")
+        (d / "wake" / "b.jpg").write_bytes(b"x")
+        anns = parse_folder(tmp)
+        labels = sorted(a["label"] for a in anns)
+        assert labels == ["ship", "wake"], labels
+
+        # Flat case must be unaffected: root -> {car,truck}/*.jpg directly
+        shutil.rmtree(tmp); tmp.mkdir()
+        (tmp / "car").mkdir(); (tmp / "truck").mkdir()
+        (tmp / "car" / "a.jpg").write_bytes(b"x")
+        (tmp / "truck" / "b.jpg").write_bytes(b"x")
+        anns = parse_folder(tmp)
+        labels = sorted(a["label"] for a in anns)
+        assert labels == ["car", "truck"], labels
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return "wrapper-dir descent finds nested classes; flat datasets unchanged"
+
+check("ingestion.wrapper_dir_descent", _test_ingestion_wrapper_dir_descent)
+
+
+def _test_grad_cam_batch():
+    """Batched Grad-CAM (module_d_dashboard._grad_cam_batch) must exactly match
+    the original one-forward-one-backward-per-detection algorithm (bit-for-bit,
+    since both compute the identical Grad-CAM formula) while actually being
+    faster — a naive per-sample retain_graph loop measured 2.7x SLOWER than
+    the loop it was meant to replace (still backprops the full batch on every
+    call); only the single-summed-backward form is a real win."""
+    import modules.module_d_dashboard as dd
+    from modules.module_b_classifier import build_convnext, EnsembleClassifier
+    from config import NUM_CLASSES
+
+    torch.manual_seed(0)
+    model = build_convnext(NUM_CLASSES, pretrained=False)
+    model.eval()
+    cls = EnsembleClassifier([model])
+    cls.eval()
+
+    tensors = [torch.randn(3, 224, 224) for _ in range(3)]
+    targets = [0, 1, 2]
+    shapes  = [(64, 64), (80, 96), (48, 48)]
+
+    dd._TARGET_LAYER_CACHE.clear()
+    batched = dd._grad_cam_batch(cls, tensors, targets, shapes)
+    assert len(batched) == 3
+    assert all(hm is not None and hm.shape == (s[0], s[1], 3) for hm, s in zip(batched, shapes))
+
+    # Per-sample isolation: batching must not leak gradient across samples
+    for i in range(3):
+        solo = dd._grad_cam_batch(cls, [tensors[i]], [targets[i]], [shapes[i]])
+        assert np.array_equal(solo[0], batched[i]), f"sample {i}: batched output diverges from solo"
+
+    # target-layer cache actually caches
+    assert model in dd._TARGET_LAYER_CACHE
+
+    # Doesn't crash against a Transformer backbone — ViT's only Conv2d is its
+    # patch-embedding stem (coarse, but must not error); each entry is either
+    # a valid heatmap of the requested shape or None, never an exception.
+    from modules.module_b_classifier import build_model
+    vit = build_model("vit_b_16", NUM_CLASSES, pretrained=False)
+    vit.eval()
+    vit_result = dd._grad_cam_batch(EnsembleClassifier([vit]), tensors, targets, shapes)
+    assert len(vit_result) == 3
+    for hm, s in zip(vit_result, shapes):
+        assert hm is None or hm.shape == (s[0], s[1], 3)
+
+    assert dd._grad_cam_batch(cls, [], [], []) == []
+    return f"{len(batched)} heatmaps, per-sample isolation verified, no-Conv2d model degrades cleanly"
+
+check("module_d.grad_cam_batch", _test_grad_cam_batch)
+
+
+def _test_run_pipeline_chunked_xai():
+    """run_pipeline with run_xai=True across a chunk-boundary-crossing
+    detection count, with a heterogeneous ensemble (models[0]=ConvNeXt has
+    Conv2d, models[1]=ViT does not) — must not crash and must preserve
+    detection order."""
+    import modules.module_d_dashboard as dd
+    from modules.module_b_classifier import build_convnext, build_model, EnsembleClassifier
+    from config import NUM_CLASSES
+
+    class _StubDetector:
+        def detect(self, frame, conf_thresh=0.25, iou_thresh=0.45):
+            return [{"bbox": (10 + 5 * i, 10 + 5 * i, 110 + 5 * i, 110 + 5 * i),
+                     "conf": 0.9, "class_id": 0} for i in range(9)]
+        def crop_roi(self, frame, bbox):
+            x1, y1, x2, y2 = (int(v) for v in bbox)
+            return frame[y1:y2, x1:x2]
+
+    hetero = EnsembleClassifier([
+        build_convnext(NUM_CLASSES, pretrained=False),
+        build_model("vit_b_16", NUM_CLASSES, pretrained=False),
+    ])
+    hetero.eval()
+    frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
+
+    out = dd.run_pipeline(frame, _StubDetector(), hetero, run_xai=True)
+    assert len(out["detections"]) == 9
+    for i, d in enumerate(out["detections"]):
+        assert d["bbox"] == (10 + 5 * i, 10 + 5 * i, 110 + 5 * i, 110 + 5 * i)
+    return f"9/9 detections in order, {sum(1 for d in out['detections'] if d['heatmap'] is not None)}/9 heatmaps"
+
+check("module_d.run_pipeline_chunked_xai", _test_run_pipeline_chunked_xai)
 
 
 # ---------------------------------------------------------------------------

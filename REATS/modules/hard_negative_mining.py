@@ -3,6 +3,12 @@ Hard-negative mining for confusable target classes.
 
 The KCI (2025) paper's confusion matrix (Table 5) shows MiG-19 and MiG-21 are most
 often misclassified as F-16 — the three fighters share a very similar IR silhouette.
+The Kaggle GPU run (2026-07-04, 43-class taxonomy, single ConvNeXt_tiny, 93.12% test
+accuracy) reproduced that exact bleed (Su27/MiG21 -> F16) and surfaced a second,
+larger cluster: armored ground vehicles. GROUND-domain accuracy (85.2%) trailed
+AIR (95.7%) and NAVAL (99.75%) specifically because of BMP2/Bradley/K21 IFV bleed and
+general T72/T90/Leopard2 MBT bleed — both are silhouette-similar tracked/wheeled
+vehicle families, the same underlying failure mode as the fighter-jet confusion.
 Standard cross-entropy training over the full dataset treats every sample equally, so
 these rare, hard-to-separate examples get drowned out by easy ones. This module:
 
@@ -33,10 +39,17 @@ if _reats_root not in sys.path:
 from config import CLASSES, NUM_CLASSES
 
 # Confusable groups — visually similar silhouettes prone to cross-misclassification.
-# F-16 / MiG-19 / MiG-21 called out explicitly by the professor (highest confusion
-# rate in the paper's confusion matrix). Extend this list as new confusions surface.
+# F-16 / MiG-19 / MiG-21: called out explicitly by the professor (highest confusion
+# rate in the paper's confusion matrix); confirmed on the 43-class taxonomy by the
+# 2026-07-04 Kaggle run's own confusion matrix (Su27/MiG21 -> F16 bleed).
+# IFV/APC and MBT: two distinct armored-vehicle clusters the same Kaggle run
+# surfaced (kept separate — the report describes them as two clusters, not one
+# six-way confusion, and IFVs/APCs aren't usually mistaken for MBTs).
+# Extend this list as new confusions surface from future confusion-matrix runs.
 CONFUSABLE_GROUPS: List[Set[str]] = [
     {"F16", "MiG19", "MiG21"},
+    {"BMP2", "Bradley", "K21"},
+    {"T72", "T90", "Leopard2"},
 ]
 
 
