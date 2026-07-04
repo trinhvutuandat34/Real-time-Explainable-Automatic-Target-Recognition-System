@@ -356,6 +356,52 @@ def parse_csv(
 # Folder-based  (sub-folder = class, whole image as ROI)
 # ---------------------------------------------------------------------------
 
+def _class_leaf_walk(d: Path, exts: set[str], depth: int, max_depth: int):
+    """See _iter_class_leaf_dirs. Yields class-leaf directories under `d`."""
+    try:
+        has_media = any(p.is_file() and p.suffix.lower() in exts for p in d.iterdir())
+    except OSError:
+        return
+    if has_media or depth >= max_depth:
+        yield d
+        return
+    try:
+        subdirs = sorted(p for p in d.iterdir() if p.is_dir())
+    except OSError:
+        return
+    if not subdirs:
+        yield d   # dead end — yield anyway so the caller sees *something*
+        return
+    for sub in subdirs:
+        yield from _class_leaf_walk(sub, exts, depth + 1, max_depth)
+
+
+def _iter_class_leaf_dirs(root: Path, exts: set[str], max_depth: int = 4):
+    """Yield the directories under `root` that hold real per-class content.
+
+    A directory counts as a class leaf once it contains at least one direct
+    file matching `exts` — that's the signal it's a genuine per-class
+    folder, not an organisational wrapper. Some Kaggle mirrors add one or
+    more such wrappers above the real per-class folders (a dataset slug, a
+    version string, an internal tooling folder) with no media of their own;
+    without this, `root`'s immediate children were read as the class labels
+    even when they were really 'swim_dataset_1.0.0' or 'ships-aerial-images'
+    rather than the actual class name one or more levels down.
+
+    A directory with its own direct media is a leaf (its subdirectories, if
+    any, are pulled in via the caller's rglob, not treated as separate
+    classes); a directory with none is assumed to be a wrapper and is
+    searched one level deeper, up to `max_depth`. For a normal, already
+    well-formed dataset (real class folders directly under root, each
+    containing images), this returns exactly root's immediate children —
+    unchanged from the prior single-level behaviour.
+    """
+    if not root.is_dir():
+        return
+    for cls_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        yield from _class_leaf_walk(cls_dir, exts, 0, max_depth)
+
+
 def parse_folder(root: Path, class_names: list[str] | None = None) -> list[dict]:
     """
     Each sub-directory is a class label. The whole image is used as ROI
@@ -363,9 +409,7 @@ def parse_folder(root: Path, class_names: list[str] | None = None) -> list[dict]
     """
     exts    = _img_exts()
     results = []
-    for cls_dir in sorted(root.iterdir()):
-        if not cls_dir.is_dir():
-            continue
+    for cls_dir in _iter_class_leaf_dirs(root, exts):
         label = cls_dir.name.lower().strip()
         if class_names and label not in {c.lower() for c in class_names}:
             continue
@@ -405,11 +449,10 @@ def parse_video_folder(
     import cv2
 
     video_exts = _video_exts()
+    media_exts = _img_exts() | video_exts
     results: list[dict] = []
 
-    for cls_dir in sorted(root.iterdir()):
-        if not cls_dir.is_dir():
-            continue
+    for cls_dir in _iter_class_leaf_dirs(root, media_exts):
         label = cls_dir.name.lower().strip()
         if class_names and label not in {c.lower() for c in class_names}:
             continue

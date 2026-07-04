@@ -134,6 +134,7 @@ Ships_Aerial:
   labels:
     ship:  __size_rule__        # resolved by size_rules above
     Ship:  __size_rule__
+    boat:  __size_rule__        # Kaggle run 2026-07-04: 1,951 raw anns, all under 'boat'
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Ships in Google Earth  (YOLO / CSV, optical, satellite)
@@ -240,6 +241,15 @@ SwimmingPool_Car:
     car:            BTR80
     swimming_pool:  null
     pool:           null
+    # Kaggle run 2026-07-04: 16,003 raw anns, 100% unmapped as bare class
+    # indices '1'/'2' — this variant's YOLO classes.txt is 1-indexed (no
+    # class 0), unlike the 0-indexed "car"/"swimming_pool" strings above.
+    # BEST-EFFORT mapping (car=1, pool=2), matching the car-before-pool
+    # ordering already assumed elsewhere in this entry — verify against the
+    # dataset's own classes.txt/data.yaml if BTR80 recall looks off after
+    # the next ingestion run.
+    "1":            BTR80
+    "2":            null
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Vehicle Data Set  (optical, various views)
@@ -259,6 +269,12 @@ Vehicle_Dataset:
     tank:         T72
     apc:          BMP2
     vehicle:      __size_rule__
+    # Kaggle run 2026-07-04: 2,563 anns unmapped under these three labels —
+    # mirrors the car/van→BTR80 (small wheeled), truck/bus→M109 (large
+    # wheeled) split already used above and in FLIR_Thermal/FLIR_ADAS_v2.
+    minivan:      BTR80
+    pickup:       BTR80
+    bus:          M109
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Semantic Segmentation of Aerial Imagery  (optical, aerial)

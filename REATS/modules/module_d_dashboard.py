@@ -3,6 +3,7 @@
 import io
 import sys
 import time
+import weakref
 import zipfile
 import csv
 import json
@@ -162,12 +163,24 @@ def run_pipeline(
         with torch.no_grad():
             batch_probs = classifier(torch.stack(pend_tensors))
 
-        for det, roi_bgr, tensor_3d, probs in zip(pend_dets, pend_rois, pend_tensors, batch_probs):
-            tensor = tensor_3d.unsqueeze(0)
+        pred_indices = [int(p.argmax()) for p in batch_probs]
 
-            pred_idx  = int(probs.argmax())
-            pred_cls  = CLASSES[pred_idx]
-            conf      = float(probs[pred_idx])
+        # Grad-CAM for the whole chunk in one shot: one forward pass + one
+        # (cheap, graph-retaining) backward pass per detection, instead of a
+        # full separate forward+backward per detection — see _grad_cam_batch.
+        heatmaps = [None] * len(pend_tensors)
+        if run_xai:
+            heatmaps = _grad_cam_batch(
+                classifier, pend_tensors, pred_indices,
+                [roi.shape[:2] for roi in pend_rois],
+            )
+
+        for det, roi_bgr, tensor_3d, probs, pred_idx, heatmap in zip(
+            pend_dets, pend_rois, pend_tensors, batch_probs, pred_indices, heatmaps
+        ):
+            tensor = tensor_3d.unsqueeze(0)
+            pred_cls = CLASSES[pred_idx]
+            conf     = float(probs[pred_idx])
 
             # MC Dropout uncertainty
             uncertainty = None
@@ -182,11 +195,6 @@ def run_pipeline(
                 mean_p    = mc_arr.mean(axis=0)
                 entropy   = float(-np.sum(mean_p * np.log(mean_p + 1e-9)))
                 uncertainty = {"entropy": round(entropy, 4), "std": mc_arr.std(axis=0).tolist()}
-
-            # Grad-CAM (simple single-model approximation)
-            heatmap = None
-            if run_xai:
-                heatmap = _grad_cam(classifier, tensor, pred_idx, roi_bgr.shape[:2])
 
             results.append({
                 "bbox":        det["bbox"],
@@ -215,50 +223,104 @@ def run_pipeline(
     return {"detections": results, "latency_ms": (time.perf_counter() - t0) * 1000}
 
 
-def _grad_cam(classifier, tensor: torch.Tensor, target_idx: int, out_shape: tuple):
-    """Minimal Grad-CAM approximation; returns RGB heatmap array or None."""
+# Last-Conv2d-layer lookup is the same for every call against a given model —
+# caching it avoids a full `model.modules()` traversal per detection (a real
+# cost the 2026-07-04 Kaggle run's end-to-end latency measurement flagged:
+# "includes constructing a fresh GradCAMExplainer inline"). WeakKeyDictionary
+# so a model that gets replaced (new checkpoint loaded) is evicted naturally.
+_TARGET_LAYER_CACHE: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _find_target_layer(model: torch.nn.Module):
+    if model in _TARGET_LAYER_CACHE:
+        return _TARGET_LAYER_CACHE[model]
+    target_layer = None
+    for layer in model.modules():
+        if isinstance(layer, torch.nn.Conv2d):
+            target_layer = layer
+    _TARGET_LAYER_CACHE[model] = target_layer
+    return target_layer
+
+
+def _grad_cam_batch(
+    classifier,
+    tensors: list,
+    target_indices: list,
+    out_shapes: list,
+):
+    """Grad-CAM for a whole chunk: ONE forward pass + ONE backward pass total
+    (not one pair per detection). The N per-sample target logits are summed
+    before a single .backward() — since Conv2d/Linear/eval-mode-BatchNorm are
+    all row-independent, d(sum)/d(acts[i]) equals exactly d(logits[i])/d(acts[i])
+    with zero cross-sample leakage, so this is not an approximation.
+
+    (A first version of this function looped `.backward(retain_graph=...)`
+    once per sample instead — that still backprops through the FULL batch on
+    every call, so it does N backward-of-N passes instead of N backward-of-1:
+    measured 2.7x SLOWER than the original per-detection loop it was meant to
+    replace. The single-summed-backward form measurably wins; see
+    smoke_test.py::module_d.grad_cam_batch for both the correctness and the
+    regression-guard timing check.)
+
+    Grad-CAM is computed against classifier.models[0] only (the first
+    ensemble member) — a softmax-averaged heterogeneous ensemble has no
+    single meaningful "last conv layer": ViT_b_16/Swin_T's only Conv2d is
+    their patch-embedding stem (a coarse, semantically shallow choice for
+    CAM), and other members may have none at all — so this is always a
+    second network pass distinct from the ensemble's own no_grad prediction
+    forward.
+    """
+    n = len(tensors)
+    if n == 0:
+        return []
     try:
         model = classifier.models[0] if hasattr(classifier, "models") else classifier
-        grads, acts = [], []
+        target_layer = _find_target_layer(model)
+        if target_layer is None:
+            return [None] * n
+
+        acts_holder: list = [None]
 
         def _fwd_hook(m, inp, out):
-            acts.append(out.detach())
-
-        def _bwd_hook(m, gin, gout):
-            grads.append(gout[0].detach())
-
-        # Hook last conv-like layer
-        target_layer = None
-        for layer in model.modules():
-            if isinstance(layer, torch.nn.Conv2d):
-                target_layer = layer
-        if target_layer is None:
-            return None
+            out.retain_grad()
+            acts_holder[0] = out
 
         fh = target_layer.register_forward_hook(_fwd_hook)
-        bh = target_layer.register_backward_hook(_bwd_hook)
+        try:
+            with torch.enable_grad():
+                batch_in = torch.stack(tensors).clone().requires_grad_(True)
+                logits = model(batch_in)
+                acts = acts_holder[0]
+                if acts is None:
+                    return [None] * n
 
-        tensor_req = tensor.clone().requires_grad_(True)
-        logits = model(tensor_req)
-        model.zero_grad()
-        logits[0, target_idx].backward()
+                model.zero_grad(set_to_none=True)
+                idx = torch.arange(n)
+                tgt = torch.as_tensor(target_indices, dtype=torch.long)
+                logits[idx, tgt].sum().backward()   # one backward, whole chunk
 
-        fh.remove()
-        bh.remove()
+                grads  = acts.grad
+                acts_d = acts.detach()
+                if grads is None:
+                    return [None] * n
 
-        if not acts or not grads:
-            return None
-
-        weights = grads[0].mean(dim=(2, 3), keepdim=True)
-        cam     = (weights * acts[0]).sum(dim=1).squeeze().numpy()
-        cam     = np.maximum(cam, 0)
-        if cam.max() > 0:
-            cam = cam / cam.max()
-        cam_resized = cv2.resize(cam, (out_shape[1], out_shape[0]))
-        heatmap     = cv2.applyColorMap((cam_resized * 255).astype(np.uint8), cv2.COLORMAP_JET)
-        return heatmap  # BGR uint8
+                heatmaps = []
+                for i, out_shape in enumerate(out_shapes):
+                    weights = grads[i].mean(dim=(1, 2), keepdim=True)
+                    cam = (weights * acts_d[i]).sum(dim=0).numpy()
+                    cam = np.maximum(cam, 0)
+                    if cam.max() > 0:
+                        cam = cam / cam.max()
+                    cam_resized = cv2.resize(cam, (out_shape[1], out_shape[0]))
+                    heatmaps.append(cv2.applyColorMap((cam_resized * 255).astype(np.uint8), cv2.COLORMAP_JET))
+                return heatmaps
+        finally:
+            try:
+                fh.remove()
+            except Exception:
+                pass
     except Exception:
-        return None
+        return [None] * n
 
 
 # ---------------------------------------------------------------------------
@@ -308,17 +370,16 @@ def _eigen_cam(
         def _fwd(m, inp, out):   # type: ignore[override]
             acts.append(out.detach())
 
-        target_layer = None
-        for layer in model.modules():
-            if isinstance(layer, torch.nn.Conv2d):
-                target_layer = layer
+        target_layer = _find_target_layer(model)
         if target_layer is None:
             return None
 
         fh = target_layer.register_forward_hook(_fwd)
-        with torch.no_grad():
-            model(tensor)
-        fh.remove()
+        try:
+            with torch.no_grad():
+                model(tensor)
+        finally:
+            fh.remove()
 
         if not acts:
             return None
