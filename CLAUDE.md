@@ -155,6 +155,7 @@ IR Frame
 - `compute_ece` accepts `is_probs=False`; set `True` when passing ensemble output (already softmax)
 - `EnsembleClassifier.forward()` returns probabilities (post-softmax mean), not logits — architecture-agnostic, so it works for both the legacy homogeneous ensemble and the heterogeneous one. **Never re-softmax its output**: a double softmax flattens 43-class confidences toward uniform (max ≈ 0.06) and silently breaks the Warning/Track/Engagement confidence thresholds. Temperature-scale ensemble probabilities through log space (`softmax(log(p)/T)`), not by dividing them like logits.
 - `preprocess_roi(roi)` converts a BGR/grayscale uint8 ROI to a normalized `(1, 3, 224, 224)` tensor via pure cv2 (no PIL round-trip, ~6× faster) — this is the real-time path used by Module D's iPhone Live Feed tab
+- `ece_from_arrays(conf, correct, n_bins)` is the vectorised binning core of `compute_ece` (numpy `searchsorted` instead of an O(bins × N) Python list-comprehension scan per bin) — fuzz-tested to match the original `(lo, hi]`-inclusive binning exactly. `metrics_report.py`'s `collect_predictions()` reuses it: accuracy, ECE, and FAR/MR are all derived from a **single** inference pass over the val/test loader (previously 3 separate passes — 3× the ensemble forward-pass cost for no reason, since none of those three metrics need a second look at the data).
 - `ARCHITECTURES = ["convnext_tiny", "resnext50", "vit_b_16", "swin_t", "vgg16", "resnet18"]` — the 6 architectures required by Do et al. (2025); `build_model(arch, num_classes, pretrained)` dispatches to the right builder. `train_ensemble(cfg, architectures=None)` trains one model per architecture (default: all 6) instead of 6 seeds of one architecture — each checkpoint saves its `arch` under the `"arch"` key so `load_ensemble()` / dashboard `load_pipeline()` reconstruct the right network per file. Checkpoints saved before this field existed default to `convnext_tiny` for backward compatibility.
 
 **Hard negative mining** (`modules/hard_negative_mining.py`): addresses classes the confusion matrix shows bleeding into each other. `CONFUSABLE_GROUPS` has 3 entries: `{F16, MiG19, MiG21}` (the KCI paper's own confusion matrix — similar fighter silhouettes) and, added after the 2026-07-04 Kaggle GPU run reproduced it on the full 43-class taxonomy, `{BMP2, Bradley, K21}` (IFV/APC bleed) and `{T72, T90, Leopard2}` (MBT bleed) — together these drove GROUND-domain accuracy to 85.2% vs 95.7%/99.75% for AIR/NAVAL that run. `mine_hard_negatives(model, dataset, device)` flags samples that are misclassified or have a low top1/top2 softmax margin, restricted to those groups. When the dataset exposes labels without image loading (ImageFolder `.targets`/`.samples`), mining only decodes and forward-passes the confusable-class subset — ~93% of inference skipped for 3 confusable classes out of 43 (now proportionally more with 9 confusable classes across 3 groups). `HardNegativeDataset` oversamples the flagged indices; `finetune_on_hard_negatives(...)` runs a short low-LR pass on top of an already-trained checkpoint — it is a post-hoc addition to the normal 300-epoch schedule, not a replacement for it.
@@ -166,6 +167,8 @@ IR Frame
 **Module C**: `GradCAMExplainer` requires `pytorch-grad-cam`; the inline `_eigen_cam` helper in Module D is gradient-free and ~5–10× faster — prefer it for real-time use. `MCDropoutWrapper.forward()` returns `{mean_probs, uncertainty, all_probs}`.
 
 **Module D Grad-CAM performance**: `module_d_dashboard._grad_cam_batch()` computes Grad-CAM for a whole `run_pipeline` chunk with ONE forward pass + ONE backward pass total (not a forward+backward pair per detection) — the N per-sample target logits are summed before a single `.backward()`; since Conv2d/Linear/eval-mode-BatchNorm are all row-independent, this gives each sample's gradient with zero cross-sample leakage, not an approximation (verified bit-identical to the original per-detection algorithm). A naive `.backward(retain_graph=True)` loop — one call per sample — was tried first and measured **2.7× slower** than the code it was meant to replace: retaining the graph still backprops through the *full* batch on every call, so it does N backward-of-N passes instead of N backward-of-1. Only the single-summed-backward form is a real win (measured 1.58×). `_find_target_layer()` caches the last-Conv2d-layer lookup per model in a `WeakKeyDictionary`, shared with `_eigen_cam`. Grad-CAM always runs against `classifier.models[0]` only — a heterogeneous ensemble has no single meaningful "last conv layer" (ViT_b_16/Swin_T's only Conv2d is their patch-embedding stem, not a semantically deep choice for CAM).
+
+**Module D classification performance**: `run_pipeline()` classifies ROIs in device-aware chunks via `_batch_size_for(classifier)` (CPU: 4, GPU: 32) rather than one ensemble forward per detection — measured on a 4-thread CPU, batch 4 runs ~49 ms/img vs ~75 ms/img at batch 32, so bigger isn't always better without a GPU to actually parallelize across. Chunking (not one unbounded batch) matters because an untrained/misconfigured detector can emit thousands of boxes; stacking all of them into a single tensor is not memory-safe. The iPhone Live Feed tab caches its `GradCAMExplainer` instance in `st.session_state` across Streamlit reruns (rebuilding one every frame at ~15 FPS would repeatedly re-scan the model's modules for hook registration) — invalidated only when the loaded model object changes.
 
 **Config / taxonomy**: `REATS/config/__init__.py` loads `targets.yaml` and exports `CLASSES, NUM_CLASSES, TARGET_META, THREAT_COLOR_BGR, RED_THREATS, ORANGE_THREATS, YELLOW_THREATS, OPERATIONAL_POLICY`. All modules import from here — never hardcode class names, counts, or policy thresholds.
 
@@ -250,13 +253,46 @@ Two services share one image (`Dockerfile` builds from `REATS/requirements.txt` 
 
 ---
 
-## Kaggle notebook workflow (`notebooks/01_kaggle_full_pipeline.ipynb`)
+## Colab notebook workflow (`notebooks/01_kaggle_full_pipeline.ipynb`)
 
-Run cells in order: `c-install` → `c-clone` → `c-config` → `c-gpu` → `c-ingest` → `c-module-a` → `c-module-b` → `c-faithfulness` → `c-dashboard`.
+Despite the filename, this notebook now targets **Google Colab**, not Kaggle — it was ported (2026-07-05) after Kaggle's own dataset-mount panel (`+ Add input`) turned out to have no Colab equivalent. Filename kept as-is (renaming would ripple through this doc, README, and MEMORY.md for no functional benefit); "Kaggle" in the name now just reflects that the datasets still come *from* Kaggle, via the API instead of a mount.
+
+Run cells in order: `c-gpu` → `c-install` → `c-clone` → `c-kaggle-data` → `c-config` → `c-ingest` → `c-module-b` (or `c-train-ensemble`) → `c-faithfulness` → `c-dashboard`.
+
+**Dataset access — `c-kaggle-data`:** Colab has no input-mount panel, so this cell authenticates against Kaggle (Colab Secrets `KAGGLE_USERNAME`/`KAGGLE_KEY`, or an interactive `kaggle.json` upload prompt) and pulls every dataset via **`kagglehub.dataset_download(handle)`** — not the `kaggle` CLI. `kagglehub` auto-caches under `~/.cache/kagglehub/` and returns each dataset's local path directly, so re-running the cell is free for anything already downloaded. `KAGGLE_DATASET_HANDLES` values can be a single handle or a list of handles tried in order (first success wins) — used for `FLIR_ADAS_v2` and `HRSC2016`, which each have a fallback mirror in case the primary is renamed/pulled. `DATASET_INPUTS` is built entirely in this cell (`{key: Path(local_path)}`); a key whose every handle fails gets a placeholder path that never exists (removed if the failed download left an empty dir) so downstream `.exists()` checks in `c-config`/`c-ingest` correctly treat it as missing — **`c-config` must never reconstruct `DATASET_INPUTS` itself** (an earlier version did, from a shared `/content/datasets/<key>` directory that doesn't exist once kagglehub manages its own per-dataset cache path — this silently clobbered every real path and made every dataset look missing; caught via a mock-exec test, not by inspection).
+
+The `kaggle` CLI (still installed alongside `kagglehub`) is kept for exactly one thing: `c-config`'s `WARM_START_KERNEL` step downloads a previous run's checkpoints via `kaggle kernels output <owner>/<kernel-slug>` — kagglehub has no kernel-output equivalent, only dataset/model downloads.
+
+**Dataset keys (20 total; 5 new relative to the original Kaggle-mounted 15):**
+
+| Key | Kaggle handle(s) | Domain |
+|---|---|---|
+| `FLIR_Thermal` | `deepnewbie/flir-thermal-images-dataset` | thermal IR |
+| `FLIR_ADAS_v2` | `samdazel/teledyne-flir-adas-thermal-dataset-v2` → fallback `rajababuadigarla/teledyne-flir-free-adas-thermal-dataset-v2` | thermal IR |
+| `HIT_UAV` | `pandrii000/hituav-a-highaltitude-infrared-thermal-dataset` | thermal aerial |
+| `HIT_UAV_v2` | `trnhvtunt/dataset1` | thermal aerial |
+| `Dataset2_Folders` | `trnhvtunt/dataset2` | air (video) |
+| `HRSC2016` | `guofeng/hrsc2016` → fallback `weiming97/hrsc2016-ms-dataset` | naval |
+| `Ships_Aerial` | `andrewmvd/ship-detection` | naval |
+| `Ships_Google_Earth` | `tomluther/ships-in-google-earth` | naval |
+| `Ships_Vessels_Aerial` | `siddharthkumarsah/ships-in-aerial-images` | naval |
+| `Ships_Satellite` *(new)* | `rhammell/ships-in-satellite-imagery` | naval |
+| `SWIM` | `lilitopia/swimship-wake-imagery-mass` | naval |
+| `SARScope_Maritime` *(new)* | `kailaspsudheer/sarscope-unveiling-the-maritime-landscape` | naval |
+| `Thermal_Ships` *(new)* | `houssemhammami525/thermal-ships` | naval (genuinely IR, unlike most "aerial" sets above) |
+| `CGI_Planes` | `airbusgeo/airbus-aircrafts-sample-dataset` | air |
+| `SwimmingPool_Car` | `kbhartiya83/swimming-pool-and-car-detection` | ground |
+| `Vehicle_Dataset` | `alpereniek/vehicle-detection-from-satellite-images-data-set` | ground |
+| `Aerial_Vehicle_Detection` *(new)* | `llpukojluct/aerial-vehicle-detection-dataset` | ground |
+| `Battle_Tank_UAV` *(new)* | `simuletic/uav-and-aerial-view-battle-tank-detection-dataset` | ground — targets the T72/Abrams/Leopard2/BMP2/Bradley/K21 confusion (see `hard_negative_mining.CONFUSABLE_GROUPS`) |
+| `Aerial_Segmentation` | `humansintheloop/semantic-segmentation-of-aerial-imagery` | mixed |
+| `Aerial_Roof_Seg` | `atilol/aerialimageryforroofsegmentation` | (null labels — contributes 0 annotations) |
+
+**The 5 new keys have no `ingestion/label_maps.yaml` entry yet** — inventing one without inspecting each dataset's actual raw label strings would risk silently mis-mapping classes (exactly the failure mode `_resolve_label`'s **UNMAPPED** report exists to catch). Run `c-ingest`, read its UNMAPPED report, and add real entries from there.
 
 ### Known pitfalls
 
-**Stale bytecode (most common issue):** Kaggle caches `.pyc` files. After a `git pull` the old compiled bytecode runs, not the new source. The `c-clone` cell clears this automatically:
+**Stale bytecode (most common issue):** the Colab kernel caches `.pyc` files across cell re-runs. After a `git pull` the old compiled bytecode runs, not the new source. The `c-clone` cell clears this automatically:
 ```python
 for _cache in ROOT.rglob('__pycache__'):
     shutil.rmtree(_cache, ignore_errors=True)
@@ -291,28 +327,29 @@ except NameError:
 
 ## Ingestion pipeline (`REATS/ingestion/`)
 
-### Dataset keys and Kaggle paths
+### Dataset keys and formats
 
-The pipeline maps `DATASET_INPUTS` dict keys to `label_maps.yaml` entries.
+The pipeline maps `DATASET_INPUTS` dict keys to `label_maps.yaml` entries. Kaggle handles for each key (now fetched via kagglehub, not a filesystem mount — see "Colab notebook workflow" above for the full list including the 5 newer keys) live in the notebook's `c-kaggle-data` cell, not here, so this table doesn't drift out of sync with it.
 
-| Key | Format | Kaggle path |
-|-----|--------|-------------|
-| `FLIR_Thermal` | coco | `/kaggle/input/.../FLIR_Thermal/` |
-| `FLIR_ADAS_v2` | coco | `/kaggle/input/.../FLIR_ADAS_v2/` |
-| `HIT_UAV` | yolo | `/kaggle/input/datasets/pandrii000/hituav-a-highaltitude-infrared-thermal-dataset` |
-| `HIT_UAV_v2` | coco | `/kaggle/input/datasets/trnhvtunt/dataset1/HIT-UAV-Infrared-Thermal-Dataset-v1.2.1/suojiashun-HIT-UAV-Infrared-Thermal-Dataset-b53106c` |
-| `Dataset2_Folders` | video_folder | `/kaggle/input/datasets/trnhvtunt/dataset2/` |
-| `HRSC2016` | xml | `/kaggle/input/.../HRSC2016/` |
-| `Ships_Aerial` | yolo | `/kaggle/input/.../Ships_Aerial/` |
-| `Ships_Google_Earth` | folder | `/kaggle/input/.../Ships_Google_Earth/` |
-| `Ships_Vessels_Aerial` | csv | `/kaggle/input/.../Ships_Vessels_Aerial/` |
-| `SWIM` | folder | `/kaggle/input/.../SWIM/` |
-| `CGI_Planes` | folder | `/kaggle/input/.../CGI_Planes/` |
-| `Airbus_Aircraft` | csv | `/kaggle/input/.../Airbus_Aircraft/` |
-| `SwimmingPool_Car` | folder | `/kaggle/input/.../SwimmingPool_Car/` |
-| `Vehicle_Dataset` | folder | `/kaggle/input/.../Vehicle_Dataset/` |
-| `Aerial_Segmentation` | folder | `/kaggle/input/.../Aerial_Segmentation/` |
-| `Aerial_Roof_Seg` | folder | `/kaggle/input/datasets/atilol/aerialimageryforroofsegmentation/` |
+| Key | Format |
+|-----|--------|
+| `FLIR_Thermal` | coco |
+| `FLIR_ADAS_v2` | coco |
+| `HIT_UAV` | yolo |
+| `HIT_UAV_v2` | coco |
+| `Dataset2_Folders` | video_folder |
+| `HRSC2016` | xml |
+| `Ships_Aerial` | yolo |
+| `Ships_Google_Earth` | folder |
+| `Ships_Vessels_Aerial` | csv |
+| `SWIM` | folder |
+| `CGI_Planes` | folder |
+| `SwimmingPool_Car` | folder |
+| `Vehicle_Dataset` | folder |
+| `Aerial_Segmentation` | folder |
+| `Aerial_Roof_Seg` | folder |
+
+The 5 datasets added 2026-07-05 (`Ships_Satellite`, `SARScope_Maritime`, `Thermal_Ships`, `Aerial_Vehicle_Detection`, `Battle_Tank_UAV`) have no format assigned here yet either — same reason as their missing `label_maps.yaml` entries: inspect first via the ingestion pipeline's own error output, don't guess.
 
 ### Video dataset support
 
@@ -328,10 +365,10 @@ Some COCO JSONs use `filename` (no underscore) or `path` instead of the standard
 
 ---
 
-## Dashboard deployment (Kaggle → browser/mobile)
+## Dashboard deployment (Colab → browser/mobile)
 
 ```python
-# In Kaggle cell — start Streamlit + ngrok tunnel
+# In a Colab cell — start Streamlit + ngrok tunnel
 import subprocess, time, pyngrok.ngrok as ngrok
 
 proc = subprocess.Popen(["streamlit", "run", str(REATS/"modules/module_d_dashboard.py"),
@@ -350,11 +387,18 @@ print("Dashboard:", tunnel.public_url)
 
 **iPhone Live without same WiFi:** Use Cloudflare Tunnel for the mobile MJPEG streamer (free, no account needed):
 ```bash
-# On Kaggle GPU
+# On the Colab GPU runtime
 curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
 chmod +x cloudflared
 ./cloudflared tunnel --url http://localhost:5000 --no-autoupdate
 ```
 Paste the `*.trycloudflare.com` URL into Dashboard → iPhone Live URL field.
 
-**Security:** Never commit ngrok tokens. Use Kaggle Secrets (`KAGGLE_SECRET_NGROK_TOKEN`) and load with `os.environ["NGROK_AUTHTOKEN"]`. Reset any exposed token immediately at dashboard.ngrok.com.
+**Security:** Never commit ngrok or Kaggle tokens. Use **Colab Secrets** (left sidebar → 🔑 icon) for both:
+```python
+from google.colab import userdata
+NGROK_TOKEN = userdata.get('NGROK_AUTHTOKEN')
+os.environ['KAGGLE_USERNAME'] = userdata.get('KAGGLE_USERNAME')
+os.environ['KAGGLE_KEY']      = userdata.get('KAGGLE_KEY')
+```
+Reset any exposed token immediately at dashboard.ngrok.com / kaggle.com/settings.

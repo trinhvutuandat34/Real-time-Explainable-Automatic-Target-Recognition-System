@@ -1,6 +1,6 @@
 # MEMORY.md — REATS Session State
 
-Last updated: 2026-07-04
+Last updated: 2026-07-05
 Active branch: `claude/model-gaps-ensemble-metrics-e4xysn`
 
 ---
@@ -13,22 +13,52 @@ Running log of architectural decisions, bug fixes, and session context so that f
 
 ## Current project state
 
-The Kaggle notebook (`notebooks/01_kaggle_full_pipeline.ipynb`) is the primary execution environment. All REATS modules (A–E) are implemented and the dashboard is functional. **A real GPU training run completed on Kaggle 2026-07-04** — see "Kaggle run results" below; it's the ground truth for what still needs work, superseding guesses made from synthetic-data smoke tests alone.
+`notebooks/01_kaggle_full_pipeline.ipynb` is the primary execution environment — **it now targets Google Colab, not Kaggle** (ported 2026-07-05; filename kept as-is, see "Colab port" below). All REATS modules (A–E) are implemented and the dashboard is functional. **A real GPU training run completed on Kaggle 2026-07-04** (before the Colab port) — see "Kaggle run results" below; it's the ground truth for what still needs work, superseding guesses made from synthetic-data smoke tests alone. That run has not yet been repeated on Colab.
 
 ### What is working
 - Module A: `IRDetector` YOLOv4 pure-PyTorch, forward pass + NMS (bootstrapped from COCO darknet weights; heads untrained on IR — 0 detections on real IR input by design until fine-tuned)
 - Module B: heterogeneous 6-architecture ensemble (ConvNeXt_tiny/ResNeXt50/ViT_b_16/Swin_T/VGG16/ResNet18), AMP + EMA, TemperatureScaler calibration, hard-negative mining (3 confusable groups)
-- Module C: GradCAM / GradCAM++ / EigenCAM, SHAP, LIME, MCDropout, faithfulness AUC — Grad-CAM now batched per-chunk in Module D (see below)
-- Module D: Streamlit 5-tab dashboard (Live Analysis, Batch, Calibration, About, iPhone Live) — FAR/MR + Warning/Track/Engagement policy wired in
+- Module C: GradCAM / GradCAM++ / EigenCAM, SHAP, LIME, MCDropout, faithfulness AUC — Grad-CAM batched per-chunk in Module D
+- Module D: Streamlit 5-tab dashboard (Live Analysis, Batch, Calibration, About, iPhone Live) — FAR/MR + Warning/Track/Engagement policy wired in; ROI classification batched device-aware (see below)
 - Module E: FastAPI/WebSocket phone-camera streamer
-- Ingestion pipeline: 16 dataset keys; wrapper-directory descent fixed 2026-07-04 (see below)
+- Ingestion pipeline: 20 dataset keys as of 2026-07-05 (was 16); wrapper-directory descent fixed 2026-07-04
+- Notebook: runs on Colab, datasets pulled via `kagglehub` (see below)
 
 ### What is pending
-- Fix the 7 zero-mapped-label datasets flagged by the 2026-07-04 run (partially addressed this session — see below; HRSC2016 may need Kaggle-input verification, not just a code fix)
+- Fix the 7 zero-mapped-label datasets flagged by the 2026-07-04 run (partially addressed; HRSC2016 may need dataset-content verification, not just a code fix)
+- **New**: add `ingestion/label_maps.yaml` entries for the 5 datasets added 2026-07-05 (`Ships_Satellite`, `SARScope_Maritime`, `Thermal_Ships`, `Aerial_Vehicle_Detection`, `Battle_Tank_UAV`) — none have a mapping yet; inspect via the ingestion pipeline's own UNMAPPED report first, don't guess
 - Fine-tune Module A on labeled IR detection data (mAP@0.5 currently unmeasured — bootstrapped detector fires on COCO classes, not IR blobs)
 - Investigate faithfulness AUC failure (0.49 deletion, target ≥0.80) — likely tied to the 81%-synthetic corpus, needs real-data share to grow before re-testing
 - Re-run hard-negative fine-tune (`hard_negative_mining.py`) against a real trained checkpoint to confirm it reduces the fighter-jet and armored-vehicle confusion the Kaggle run's confusion matrix showed
-- iPhone Live tab: requires second tunnel (Cloudflare) when phone is not on same WiFi as Kaggle
+- **New**: re-run the full pipeline on Colab (datasets via kagglehub, including the 5 new ones + `Battle_Tank_UAV` specifically targeting the GROUND-domain confusion) to get a post-fix accuracy/FAR-MR baseline — the 93.12%/85.2%-GROUND numbers below are all pre-Colab-port, pre-new-dataset
+- iPhone Live tab: requires second tunnel (Cloudflare) when phone is not on same WiFi as the notebook's GPU runtime
+
+---
+
+## Notebook crash bugs fixed pre-Colab-port (2026-07-05)
+
+The gap-analysis work (heterogeneous ensemble, FAR/MR, hard-negative mining, threat policy — see `docs/gap_analysis_report.md`) changed `module_b_classifier.py`'s API, but the notebook that actually produces GPU runs was never updated to match. Found and fixed before the Colab port:
+
+- `c-train-ensemble` called `train_ensemble(CONFIG, n_models=6, ckpt_dir=...)` — `n_models` no longer exists (replaced by `architectures`). Would have raised `TypeError` the moment a single model scored below 0.92.
+- `c-eval-metrics`'s resume-safe check globbed for `convnext_[0-5].pth` to detect a saved ensemble on disk; new checkpoints are named `{arch}_{i}.pth` (e.g. `convnext_tiny_0.pth`, `resnext50_1.pth`). The glob would never match, so a resumed session would silently fail to find a previously-trained heterogeneous ensemble and retrain from scratch.
+- Added a FAR/MR reporting cell right after `c-eval-metrics` (reuses `all_preds`/`all_labels` already collected there — zero extra inference) and an optional hard-negative-mining cell after the confusion matrix (off by default via a flag) — both exist in the codebase but were never wired into the notebook that produces the actual runs.
+- `c-pipeline`'s `reats_pipeline()` now runs one untimed warm-up call before timing, then averages 5 warm reps — the 2026-07-04 run's 111.9ms latency figure included one-time GradCAM hook/module-scan construction cost, which the run's own report flagged as "not representative of steady-state."
+
+---
+
+## Colab port + kagglehub integration (2026-07-05)
+
+The notebook was Kaggle-only: `/kaggle/working`/`/kaggle/input` paths throughout, and datasets sourced via Kaggle's "+ Add input" mount panel, which has no Colab equivalent. Ported in two passes:
+
+**Pass 1 — path/environment port.** `/kaggle/working` → `/content` everywhere (c-config, c-sample-grid, c-dist-chart, c-confusion, c-gradcam, c-module-a, c-pipeline, 971d98df, c-dashboard, c-summary). New `c-kaggle-data` setup cell (inserted after `c-clone`, before `c-config`) handles Kaggle auth (Colab Secrets `KAGGLE_USERNAME`/`KAGGLE_KEY`, or an upload prompt for `kaggle.json`) and originally downloaded datasets via the `kaggle` CLI (`kaggle datasets download -p <dest> --unzip`) into `/content/datasets/<key>/`. Warm-start (previously a mounted notebook-output input) now uses `kaggle kernels output <owner>/<kernel>` — no kagglehub equivalent for kernel outputs, so the `kaggle` CLI stays installed for this one purpose.
+
+**Bug caught by mock-exec testing (pass 1):** the download loop pre-created the destination directory before attempting the download, so a *failed* download left an empty dir behind — `.exists()` downstream would then wrongly report it as "available" with zero real files (Kaggle's own mount semantics never have this in-between state: a dataset either has content or the mount doesn't exist at all). Fixed by `rmdir()`-ing the empty placeholder on failure. Caught this via a 3-scenario mock-exec test (all-fail / all-succeed / already-present-skip) with `subprocess` stubbed, not by inspection — worth repeating this pattern for any future notebook-cell change that manages its own directory state.
+
+**Pass 2 — switched to `kagglehub`.** User supplied a list of `kagglehub.dataset_download(handle)` snippets and asked to fuse them in. Rewrote `c-kaggle-data` to use `kagglehub.dataset_download()` instead of the `kaggle` CLI subprocess (simpler: no `-p`/`--unzip`/directory bookkeeping, auto-caches under `~/.cache/kagglehub/`, returns the local path directly). `KAGGLE_DATASET_HANDLES` values are now a single handle or a list of handles tried in order — used for 2 of the user's supplied handles that are fallback mirrors (`FLIR_ADAS_v2` → `rajababuadigarla/teledyne-flir-free-adas-thermal-dataset-v2`, `HRSC2016` → `weiming97/hrsc2016-ms-dataset`). 5 of the user's handles were genuinely new datasets, added as new keys: `SARScope_Maritime`, `Ships_Satellite`, `Aerial_Vehicle_Detection`, `Battle_Tank_UAV` (targets the T72/Abrams/Leopard2/BMP2/Bradley/K21 GROUND-domain confusion below), `Thermal_Ships` (genuinely IR, unlike most of the optical/RGB "aerial" sets already in the list). **None of these 5 have a `label_maps.yaml` entry yet** — deliberately not fabricated; the ingestion pipeline's UNMAPPED report is the correct way to discover real label strings, same principle as the 2026-07-04 label-map fixes below.
+
+**Second bug caught by mock-exec testing (pass 2):** `c-config` still had its old line reconstructing `DATASET_INPUTS` from the now-removed shared `DATASETS_DIR` — since kagglehub returns a different cache path per dataset (no shared directory to reconstruct from), that line would have silently overwritten every real kagglehub path with a nonexistent stand-in, making every dataset look "missing" downstream despite successful downloads. Removed; `c-config` now trusts `DATASET_INPUTS` as built in `c-kaggle-data`. Also caught by mock-exec (fallback-to-mirror + all-handles-fail + available/missing-count assertions), not by inspection — same lesson as pass 1.
+
+**Both passes:** notebook re-read is no longer possible via the Read tool in one shot once it grows past ~25k tokens (hit this mid-session) — edited the `.ipynb` JSON directly via a Python script instead (`json.load` → mutate `cells_by_id[...]["source"]` → `json.dump(..., indent=1, ensure_ascii=False)`, which round-trips byte-identical to Jupyter's own formatting for untouched cells). Always dry-run against a copy first, diff cell IDs before/after to confirm nothing was reordered/clobbered, and mock-execute any cell with nontrivial control flow (not just `ast.parse` for syntax) before touching the real file.
 
 ---
 
@@ -100,7 +130,12 @@ Never use `conf_thresh` in `__init__` or `conf` in `detect()`.
 
 ---
 
-## Kaggle dataset paths (as of 2026-06-28)
+## Dataset handles — superseded, see CLAUDE.md
+
+This section used to list literal `/kaggle/input/...` mount paths (as of 2026-06-28). Obsolete since the 2026-07-05 Colab port: there's no mount anymore, datasets come from `kagglehub.dataset_download(handle)` inside the notebook's `c-kaggle-data` cell. Current source of truth is CLAUDE.md's "Colab notebook workflow" dataset table (20 keys, includes 2 fallback mirrors and the 5 datasets added 2026-07-05) — don't hand-maintain a second copy of that list here.
+
+<details>
+<summary>Old snapshot (2026-06-28, kept only for historical diff context)</summary>
 
 ```python
 DATASET_INPUTS = {
@@ -134,6 +169,8 @@ DATASET_INPUTS = {
 }
 ```
 
+</details>
+
 ---
 
 ## REATS 43-class taxonomy (from `config/targets.yaml`, corrected 2026-07-04 — the table here previously drifted out of sync with the actual YAML; always check `targets.yaml` directly for ground truth)
@@ -161,8 +198,8 @@ Threat levels: 36 RED, 6 ORANGE, 1 YELLOW. `operational_policy` section added 20
 - **Port:** 8501 (Streamlit default)
 - **Tunnel:** ngrok (auth token via env var, never hardcoded)
 - **iPhone Live without same WiFi:** Cloudflare Tunnel on port 5000 for the MJPEG streamer
-- **Log file:** `/kaggle/working/streamlit.log`
-- **Security:** ngrok tokens go in Kaggle Secrets, not notebook cells
+- **Log file:** `/content/streamlit.log` (was `/kaggle/working/streamlit.log` before the 2026-07-05 Colab port)
+- **Security:** ngrok and Kaggle tokens go in **Colab Secrets** (left sidebar → 🔑 icon), not notebook cells
 
 ---
 
@@ -189,7 +226,9 @@ REATS/
     threat_policy.py                map_confidence_to_policy() — Warning/Track/Engagement
   notebooks/
     00_baseline.ipynb               local training walkthrough
-    01_kaggle_full_pipeline.ipynb   Kaggle A100/T4 full pipeline
+    01_kaggle_full_pipeline.ipynb   Colab GPU full pipeline (name predates the 2026-07-05
+                                     Kaggle→Colab port; datasets still sourced from Kaggle,
+                                     now via kagglehub instead of a mount)
   requirements.txt
   verify_env.py
   smoke_test.py                     22 checks, no GPU/data required
