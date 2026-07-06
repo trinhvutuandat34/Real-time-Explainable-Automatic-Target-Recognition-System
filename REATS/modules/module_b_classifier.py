@@ -226,7 +226,10 @@ def build_loaders(cfg: dict = CONFIG) -> Tuple[DataLoader, DataLoader, DataLoade
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
     ])
     root = Path(cfg["data_root"])
-    kw   = dict(batch_size=cfg["batch_size"], num_workers=4, pin_memory=True)
+    # pin_memory only helps host→CUDA copies; on CPU-only ("base" Kaggle) it is
+    # a no-op that just prints a warning, so gate it on CUDA availability.
+    kw   = dict(batch_size=cfg["batch_size"], num_workers=4,
+                pin_memory=torch.cuda.is_available())
     return (
         DataLoader(datasets.ImageFolder(root / "train", transform=base_tf), shuffle=True,  **kw),
         DataLoader(datasets.ImageFolder(root / "val",   transform=base_tf), shuffle=False, **kw),

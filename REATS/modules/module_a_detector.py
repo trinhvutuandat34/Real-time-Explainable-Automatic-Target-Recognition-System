@@ -749,7 +749,8 @@ class IRDetector:
         self.model.train()
         ds      = MosaicDataset(data_root, split="train", imgsz=imgsz, augment=True)
         loader  = DataLoader(ds, batch_size=batch, shuffle=True,
-                             num_workers=workers, collate_fn=_collate, pin_memory=True)
+                             num_workers=workers, collate_fn=_collate,
+                             pin_memory=torch.cuda.is_available())
         loss_fn = YOLOv4Loss(num_classes=self.num_classes)
         optim   = torch.optim.SGD(self.model.parameters(), lr=lr, momentum=0.937, weight_decay=5e-4, nesterov=True)
         sched   = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=epochs, eta_min=lr * 0.01)
