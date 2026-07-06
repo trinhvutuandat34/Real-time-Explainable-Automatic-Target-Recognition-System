@@ -388,3 +388,16 @@ Thermal_Ships:
     boats:    __size_rule__
     person:   null
     people:   null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ships in Satellite Imagery — shipsnet  (optical, 80×80 classification tiles)
+# Kaggle: rhammell/ships-in-satellite-imagery. No bboxes; the whole tile is the
+# ROI and the filename prefix is the label (1 = ship, 0 = no-ship). Tiny optical
+# tiles — architecture-validation value only; '1' maps to a generic surface
+# combatant since no size/type signal is available.
+# ─────────────────────────────────────────────────────────────────────────────
+Ships_Satellite:
+  thermal: false
+  labels:
+    "1": Frigate    # ship tile → generic naval surface combatant
+    "0": null       # no-ship background tile

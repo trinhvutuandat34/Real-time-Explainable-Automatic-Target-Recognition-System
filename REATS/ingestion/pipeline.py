@@ -41,7 +41,7 @@ if str(_REATS_ROOT) not in sys.path:
 from config import CLASSES, NUM_CLASSES
 from ingestion.formats import (
     parse_coco, parse_yolo, parse_xml, parse_csv,
-    parse_folder, parse_video_folder,
+    parse_folder, parse_video_folder, parse_filename_prefix,
 )
 from ingestion.preprocessor import process_annotation, save_patch
 
@@ -181,11 +181,15 @@ _KNOWN_DATASETS: dict[str, dict] = {
         "img_dirs":   ["images"],
         "yolo_classes": ["ship", "vessel"],
     },
+    # SWIM ship-wake — Pascal-VOC layout with ROTATED boxes (<robndbox>):
+    # SWIM_Dataset_1.0.0/{Annotations(xml), JPEGImages(jpg), Landmarks(xml)}.
+    # parse_xml reads <robndbox> and takes its axis-aligned envelope. Explicit
+    # paths target Annotations (not the same-shaped Landmarks dir); the xml
+    # rglob fallback still recovers it if the version-stamped wrapper changes.
     "SWIM": {
-        "format": "yolo",
-        "label_dirs": ["labels"],
-        "img_dirs":   ["images"],
-        "yolo_classes": ["ship", "wake"],
+        "format": "xml",
+        "ann_dirs": ["SWIM_Dataset_1.0.0/Annotations"],
+        "img_dirs": ["SWIM_Dataset_1.0.0/JPEGImages"],
     },
     # Airbus aircraft sample (airbusgeo): images/*.jpg + annotations.csv with
     # image_id + WKT geometry columns (parse_csv extracts the envelope bbox).
@@ -260,6 +264,14 @@ _KNOWN_DATASETS: dict[str, dict] = {
     "Thermal_Ships": {
         "format": "yolo",
         "yolo_classes": ["vessel", "person"],
+    },
+    # Ships in satellite imagery (shipsnet) — no annotation files; 80×80 tiles
+    # named '<label>__<scene>__<coords>.png' with label 1=ship / 0=no-ship.
+    "Ships_Satellite": {
+        "format": "filename_prefix",
+        "img_root": "shipsnet",     # skip the unlabeled scenes/ folder
+        "prefix_sep": "__",
+        "prefix_index": 0,
     },
 }
 
@@ -451,6 +463,14 @@ def load_dataset_annotations(
     elif fmt == "video_folder":
         img_root = dataset_root / info.get("img_root", ".")
         annotations += parse_video_folder(img_root if img_root.exists() else dataset_root)
+
+    elif fmt == "filename_prefix":
+        img_root = dataset_root / info.get("img_root", ".")
+        annotations += parse_filename_prefix(
+            img_root if img_root.exists() else dataset_root,
+            sep=info.get("prefix_sep", "__"),
+            label_index=info.get("prefix_index", 0),
+        )
 
     # ── Universal fallback: auto-detect actual format ────────────────────
     if not annotations:

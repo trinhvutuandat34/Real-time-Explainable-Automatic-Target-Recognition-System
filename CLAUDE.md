@@ -283,7 +283,7 @@ Run cells in order: `c-gpu` → `c-install` → `c-clone` → `c-config` → `c-
 | `HIT_UAV` | `pandrii000/hituav-a-highaltitude-infrared-thermal-dataset` | thermal aerial |
 | `HIT_UAV_v2` | `trnhvtunt/dataset1` | thermal aerial |
 | `Dataset2_Folders` | `trnhvtunt/dataset2` | air (video) |
-| `HRSC2016` | `guofeng/hrsc2016` → fallback `weiming97/hrsc2016-ms-dataset` | naval |
+| `HRSC2016` | `weiming97/hrsc2016-ms-dataset` → fallback `guofeng/hrsc2016` | naval |
 | `Ships_Aerial` | `andrewmvd/ship-detection` | naval |
 | `Ships_Google_Earth` | `tomluther/ships-in-google-earth` | naval |
 | `Ships_Vessels_Aerial` | `siddharthkumarsah/ships-in-aerial-images` | naval |

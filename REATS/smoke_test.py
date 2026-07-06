@@ -392,6 +392,55 @@ def _test_ingestion_roboflow_stem_lookup():
 check("ingestion.roboflow_stem_lookup", _test_ingestion_roboflow_stem_lookup)
 
 
+def _test_ingestion_robndbox_xml():
+    """SWIM wake/ship annotations are ROTATED boxes (<robndbox><cx><cy><w><h>
+    <angle>); parse_xml must convert one to its axis-aligned envelope, not skip
+    it (which folder-fell-back to 'jpegimages'/'pngimages' labels)."""
+    import tempfile, shutil
+    from ingestion.formats import parse_xml
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        (tmp / "Annotations").mkdir()
+        (tmp / "JPEGImages").mkdir()
+        (tmp / "JPEGImages" / "00270.jpg").write_bytes(b"x")
+        (tmp / "Annotations" / "00270.xml").write_text(
+            "<annotation><filename>00270</filename>"
+            "<object><type>robndbox</type><name>wake</name>"
+            "<robndbox><cx>384</cx><cy>384</cy><w>200</w><h>60</h><angle>0</angle>"
+            "</robndbox></object></annotation>")
+        anns = parse_xml(tmp / "Annotations", tmp / "JPEGImages")
+        assert len(anns) == 1, anns
+        assert tuple(anns[0]["bbox"]) == (284, 354, 484, 414), anns[0]["bbox"]
+        assert anns[0]["label"] == "wake", anns[0]["label"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return "robndbox rotated box → axis-aligned envelope"
+
+check("ingestion.robndbox_xml", _test_ingestion_robndbox_xml)
+
+
+def _test_ingestion_filename_prefix():
+    """shipsnet tiles have no annotation files — the label is the filename
+    prefix ('1__scene__xy.png' = ship, '0__…' = background). Whole tile is the
+    ROI (bbox None)."""
+    import tempfile, shutil
+    from ingestion.formats import parse_filename_prefix
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        (tmp / "1__sceneA__x.png").write_bytes(b"x")
+        (tmp / "0__sceneB__y.png").write_bytes(b"x")
+        anns = parse_filename_prefix(tmp)
+        assert sorted(a["label"] for a in anns) == ["0", "1"], anns
+        assert all(a["bbox"] is None for a in anns)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return "filename-prefix label parse (1=ship, 0=background)"
+
+check("ingestion.filename_prefix", _test_ingestion_filename_prefix)
+
+
 def _test_grad_cam_batch():
     """Batched Grad-CAM (module_d_dashboard._grad_cam_batch) must exactly match
     the original one-forward-one-backward-per-detection algorithm (bit-for-bit,
