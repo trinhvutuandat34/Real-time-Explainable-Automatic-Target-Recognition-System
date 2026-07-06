@@ -41,7 +41,7 @@ if str(_REATS_ROOT) not in sys.path:
 from config import CLASSES, NUM_CLASSES
 from ingestion.formats import (
     parse_coco, parse_yolo, parse_xml, parse_csv,
-    parse_folder, parse_video_folder,
+    parse_folder, parse_video_folder, parse_filename_prefix,
 )
 from ingestion.preprocessor import process_annotation, save_patch
 
@@ -57,6 +57,37 @@ def _load_label_maps() -> dict:
 def _norm_label(s: str) -> str:
     """Normalise a raw label for map lookup: lowercase, strip, unify separators."""
     return str(s).strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _yolo_names_near(labels_dir: Path, max_up: int = 3) -> list[str] | None:
+    """Read a YOLO dataset's own class names from a data.yaml near a labels dir.
+
+    Roboflow/Ultralytics exports ship a `data.yaml` (`names: [...]`) beside the
+    train/val/test folders, so the class-index → name mapping travels with the
+    data instead of being hard-coded here. Walks up from `labels_dir` (e.g.
+    `<wrapper>/train/labels`) looking for data.yaml/data.yml/dataset.yaml, so a
+    dataset that bundles several YOLO sub-datasets (each with its own data.yaml
+    and its own class order) resolves each one correctly. Returns None if none
+    found — callers fall back to the configured `yolo_classes`.
+    """
+    d = labels_dir
+    for _ in range(max_up + 1):
+        for yname in ("data.yaml", "data.yml", "dataset.yaml"):
+            yf = d / yname
+            if yf.exists():
+                try:
+                    y = yaml.safe_load(yf.read_text()) or {}
+                except Exception:
+                    y = {}
+                names = y.get("names")
+                if isinstance(names, dict):   # {0: ship, 1: person} → ordered list
+                    names = [names[k] for k in sorted(names)]
+                if isinstance(names, list) and names:
+                    return [str(n) for n in names]
+        if d.parent == d:
+            break
+        d = d.parent
+    return None
 
 
 def _resolve_label(
@@ -150,11 +181,15 @@ _KNOWN_DATASETS: dict[str, dict] = {
         "img_dirs":   ["images"],
         "yolo_classes": ["ship", "vessel"],
     },
+    # SWIM ship-wake — Pascal-VOC layout with ROTATED boxes (<robndbox>):
+    # SWIM_Dataset_1.0.0/{Annotations(xml), JPEGImages(jpg), Landmarks(xml)}.
+    # parse_xml reads <robndbox> and takes its axis-aligned envelope. Explicit
+    # paths target Annotations (not the same-shaped Landmarks dir); the xml
+    # rglob fallback still recovers it if the version-stamped wrapper changes.
     "SWIM": {
-        "format": "yolo",
-        "label_dirs": ["labels"],
-        "img_dirs":   ["images"],
-        "yolo_classes": ["ship", "wake"],
+        "format": "xml",
+        "ann_dirs": ["SWIM_Dataset_1.0.0/Annotations"],
+        "img_dirs": ["SWIM_Dataset_1.0.0/JPEGImages"],
     },
     # Airbus aircraft sample (airbusgeo): images/*.jpg + annotations.csv with
     # image_id + WKT geometry columns (parse_csv extracts the envelope bbox).
@@ -213,6 +248,30 @@ _KNOWN_DATASETS: dict[str, dict] = {
     "Aerial_Roof_Seg": {
         "format": "folder",
         "img_root": ".",
+    },
+    # SARScope — SAR maritime ship detection (Roboflow YOLO under SaRscope/).
+    # Class names come from the dataset's own data.yaml (['background','ship']);
+    # yolo_classes here is only the fallback if that file is missing.
+    "SARScope_Maritime": {
+        "format": "yolo",
+        "yolo_classes": ["background", "ship"],
+    },
+    # Thermal_Ships — genuinely IR/thermal ship imagery. Bundles THREE YOLO
+    # sub-datasets (massmind_yolo / "IR boats.yolov11" / "Thermal ships.yolov11"),
+    # each with its own data.yaml and its own class order — the rglob fallback
+    # reads per-sub-dataset names via _yolo_names_near, so one yolo_classes
+    # fallback here does not have to be correct for all three.
+    "Thermal_Ships": {
+        "format": "yolo",
+        "yolo_classes": ["vessel", "person"],
+    },
+    # Ships in satellite imagery (shipsnet) — no annotation files; 80×80 tiles
+    # named '<label>__<scene>__<coords>.png' with label 1=ship / 0=no-ship.
+    "Ships_Satellite": {
+        "format": "filename_prefix",
+        "img_root": "shipsnet",     # skip the unlabeled scenes/ folder
+        "prefix_sep": "__",
+        "prefix_index": 0,
     },
 }
 
@@ -280,13 +339,15 @@ def _autodetect_annotations(
             pass
 
     # ── 4. YOLO txt: any labels/ subdirectory ───────────────────────────
+    all_yolo: list[dict] = []
     for lbl_dir in dataset_root.rglob("labels"):
         if not lbl_dir.is_dir():
             continue
+        names   = _yolo_names_near(lbl_dir) or classes
         img_dir = lbl_dir.parent / "images"
-        anns = parse_yolo(lbl_dir, img_dir if img_dir.exists() else dataset_root, classes)
-        if anns:
-            return anns
+        all_yolo += parse_yolo(lbl_dir, img_dir if img_dir.exists() else dataset_root, names)
+    if all_yolo:
+        return all_yolo
 
     # ── 5. Video folder: mp4/avi/mov files in class sub-directories ─────
     from ingestion.formats import _video_exts
@@ -356,7 +417,14 @@ def load_dataset_annotations(
         if not annotations:
             for lbl_dir in dataset_root.rglob("labels"):
                 if lbl_dir.is_dir():
-                    annotations += parse_yolo(lbl_dir, dataset_root, classes)
+                    # Pair each labels/ dir with its sibling images/ dir, and
+                    # prefer the sub-dataset's own data.yaml class names — a
+                    # single dataset root may bundle several YOLO sets with
+                    # different class orders (e.g. Thermal_Ships).
+                    names   = _yolo_names_near(lbl_dir) or classes
+                    img_dir = lbl_dir.parent / "images"
+                    annotations += parse_yolo(
+                        lbl_dir, img_dir if img_dir.exists() else dataset_root, names)
 
     elif fmt == "xml":
         for ann_rel, img_rel in zip(
@@ -395,6 +463,14 @@ def load_dataset_annotations(
     elif fmt == "video_folder":
         img_root = dataset_root / info.get("img_root", ".")
         annotations += parse_video_folder(img_root if img_root.exists() else dataset_root)
+
+    elif fmt == "filename_prefix":
+        img_root = dataset_root / info.get("img_root", ".")
+        annotations += parse_filename_prefix(
+            img_root if img_root.exists() else dataset_root,
+            sep=info.get("prefix_sep", "__"),
+            label_index=info.get("prefix_index", 0),
+        )
 
     # ── Universal fallback: auto-detect actual format ────────────────────
     if not annotations:

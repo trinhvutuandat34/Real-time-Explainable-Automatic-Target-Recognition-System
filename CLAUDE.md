@@ -283,20 +283,20 @@ Run cells in order: `c-gpu` → `c-install` → `c-clone` → `c-config` → `c-
 | `HIT_UAV` | `pandrii000/hituav-a-highaltitude-infrared-thermal-dataset` | thermal aerial |
 | `HIT_UAV_v2` | `trnhvtunt/dataset1` | thermal aerial |
 | `Dataset2_Folders` | `trnhvtunt/dataset2` | air (video) |
-| `HRSC2016` | `guofeng/hrsc2016` → fallback `weiming97/hrsc2016-ms-dataset` | naval |
+| `HRSC2016` | `weiming97/hrsc2016-ms-dataset` → fallback `guofeng/hrsc2016` | naval |
 | `Ships_Aerial` | `andrewmvd/ship-detection` | naval |
 | `Ships_Google_Earth` | `tomluther/ships-in-google-earth` | naval |
 | `Ships_Vessels_Aerial` | `siddharthkumarsah/ships-in-aerial-images` | naval |
 | `Ships_Satellite` *(new)* | `rhammell/ships-in-satellite-imagery` | naval |
 | `SWIM` | `lilitopia/swimship-wake-imagery-mass` | naval |
-| `SARScope_Maritime` *(new)* | `kailaspsudheer/sarscope-unveiling-the-maritime-landscape` | naval |
+| `SARScope_Maritime` *(new)* | `alibidaran/sarscope` (notebook output) | naval |
 | `Thermal_Ships` *(new)* | `houssemhammami525/thermal-ships` | naval (genuinely IR, unlike most "aerial" sets above) |
 | `CGI_Planes` | `aceofspades914/cgi-planes-in-satellite-imagery-w-bboxes` | air |
 | `Airbus_Aircraft` *(restored)* | `airbusgeo/airbus-aircrafts-sample-dataset` — **organization** account, mounts under `datasets/organizations/` | air |
 | `SwimmingPool_Car` | `kbhartiya83/swimming-pool-and-car-detection` | ground |
 | `Vehicle_Dataset` | `alpereniek/vehicle-detection-from-satellite-images-data-set` | ground |
 | `Aerial_Vehicle_Detection` *(new)* | `llpukojluct/aerial-vehicle-detection-dataset` | ground |
-| `Battle_Tank_UAV` *(new)* | `simuletic/uav-and-aerial-view-battle-tank-detection-dataset` | ground — targets the T72/Abrams/Leopard2/BMP2/Bradley/K21 confusion (see `hard_negative_mining.CONFUSABLE_GROUPS`) |
+| `Battle_Tank_UAV` *(new)* | `awaisalisaduzai/tank-detection-vit` (notebook output) | ground — targets the T72/Abrams/Leopard2/BMP2/Bradley/K21 confusion (see `hard_negative_mining.CONFUSABLE_GROUPS`) |
 | `Aerial_Segmentation` | `humansintheloop/semantic-segmentation-of-aerial-imagery` | mixed |
 | `Aerial_Roof_Seg` | `atilol/aerialimageryforroofsegmentation` | (null labels — contributes 0 annotations) |
 | notebook output `trnhvtunt/real-time-ex-03` | warm-start checkpoints | — |

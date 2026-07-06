@@ -344,3 +344,60 @@ Aerial_Roof_Seg:
     vegetation: null
     road:       null
     water:      null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SARScope — SAR maritime ship detection  (Roboflow YOLO, radar imagery)
+# Source: notebook output alibidaran/sarscope → SaRscope/{train,valid,test}
+# data.yaml names: ['background', 'ship']  (class 0 = background, discarded)
+# ─────────────────────────────────────────────────────────────────────────────
+SARScope_Maritime:
+  thermal: false          # SAR (radar) intensity, not optical RGB nor IR
+  size_rules:
+    - max_area_px: 3000
+      class: FastAttack
+    - max_area_px: 12000
+      class: Frigate
+    - class: Destroyer
+  labels:
+    ship:        __size_rule__
+    vessel:      __size_rule__
+    boat:        FastAttack
+    background:  null       # YOLO class 0 in this dataset — not a target
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Thermal Ships — genuinely IR/thermal ship imagery  (Roboflow YOLO)
+# Source: houssemhammami525/thermal-ships — bundles 3 YOLO sub-datasets
+# (massmind_yolo, "IR boats.yolov11", "Thermal ships.yolov11"), each with its
+# own data.yaml names; the pipeline reads those per sub-dataset. Map every
+# ship/boat/vessel synonym to the naval size-rule; drop person.
+# ─────────────────────────────────────────────────────────────────────────────
+Thermal_Ships:
+  thermal: true           # real IR/thermal — one of the few true-IR naval sources
+  size_rules:
+    - max_area_px: 3000
+      class: FastAttack
+    - max_area_px: 10000
+      class: Frigate
+    - class: Destroyer
+  labels:
+    vessel:   __size_rule__
+    vessels:  __size_rule__
+    ship:     __size_rule__
+    ships:    __size_rule__
+    boat:     __size_rule__
+    boats:    __size_rule__
+    person:   null
+    people:   null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ships in Satellite Imagery — shipsnet  (optical, 80×80 classification tiles)
+# Kaggle: rhammell/ships-in-satellite-imagery. No bboxes; the whole tile is the
+# ROI and the filename prefix is the label (1 = ship, 0 = no-ship). Tiny optical
+# tiles — architecture-validation value only; '1' maps to a generic surface
+# combatant since no size/type signal is available.
+# ─────────────────────────────────────────────────────────────────────────────
+Ships_Satellite:
+  thermal: false
+  labels:
+    "1": Frigate    # ship tile → generic naval surface combatant
+    "0": null       # no-ship background tile

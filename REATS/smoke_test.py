@@ -368,6 +368,79 @@ def _test_ingestion_wrapper_dir_descent():
 check("ingestion.wrapper_dir_descent", _test_ingestion_wrapper_dir_descent)
 
 
+def _test_ingestion_roboflow_stem_lookup():
+    """Roboflow YOLO exports name files 'foo_jpg.rf.HASH.jpg'; the image cache
+    is keyed by the true stem 'foo_jpg.rf.HASH'. _find_image must not apply
+    Path().stem a second time to an already-stripped name — that over-strips
+    the '.HASH' segment, misses the cache, and silently drops 100% of a
+    Roboflow dataset's annotations (Kaggle run 2026-07-06: Ships_Vessels_Aerial
+    13,435 anns → 0 mapped, folder-fell-back to the label 'images'). Plain
+    'name.jpg' filenames must still resolve to their stem key."""
+    from pathlib import Path as _P
+    from ingestion.formats import _find_image
+
+    dotted = "ship042_jpg.rf.9a8b7c6d5e"        # == txt_path.stem for the .txt label
+    cache  = {dotted: _P("/data") / f"{dotted}.jpg"}
+    assert _find_image(_P("/nope"), dotted, cache=cache) is not None, \
+        "dotted Roboflow stem missed the cache"
+
+    cache2 = {"FLIR_08863": _P("/d/FLIR_08863.jpg")}   # cache keyed by true stem
+    assert _find_image(_P("/nope"), "FLIR_08863.jpg", cache=cache2) is not None, \
+        "plain full filename failed to resolve to its stem"
+    return "dotted Roboflow stems + plain filenames both resolve"
+
+check("ingestion.roboflow_stem_lookup", _test_ingestion_roboflow_stem_lookup)
+
+
+def _test_ingestion_robndbox_xml():
+    """SWIM wake/ship annotations are ROTATED boxes (<robndbox><cx><cy><w><h>
+    <angle>); parse_xml must convert one to its axis-aligned envelope, not skip
+    it (which folder-fell-back to 'jpegimages'/'pngimages' labels)."""
+    import tempfile, shutil
+    from ingestion.formats import parse_xml
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        (tmp / "Annotations").mkdir()
+        (tmp / "JPEGImages").mkdir()
+        (tmp / "JPEGImages" / "00270.jpg").write_bytes(b"x")
+        (tmp / "Annotations" / "00270.xml").write_text(
+            "<annotation><filename>00270</filename>"
+            "<object><type>robndbox</type><name>wake</name>"
+            "<robndbox><cx>384</cx><cy>384</cy><w>200</w><h>60</h><angle>0</angle>"
+            "</robndbox></object></annotation>")
+        anns = parse_xml(tmp / "Annotations", tmp / "JPEGImages")
+        assert len(anns) == 1, anns
+        assert tuple(anns[0]["bbox"]) == (284, 354, 484, 414), anns[0]["bbox"]
+        assert anns[0]["label"] == "wake", anns[0]["label"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return "robndbox rotated box → axis-aligned envelope"
+
+check("ingestion.robndbox_xml", _test_ingestion_robndbox_xml)
+
+
+def _test_ingestion_filename_prefix():
+    """shipsnet tiles have no annotation files — the label is the filename
+    prefix ('1__scene__xy.png' = ship, '0__…' = background). Whole tile is the
+    ROI (bbox None)."""
+    import tempfile, shutil
+    from ingestion.formats import parse_filename_prefix
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        (tmp / "1__sceneA__x.png").write_bytes(b"x")
+        (tmp / "0__sceneB__y.png").write_bytes(b"x")
+        anns = parse_filename_prefix(tmp)
+        assert sorted(a["label"] for a in anns) == ["0", "1"], anns
+        assert all(a["bbox"] is None for a in anns)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return "filename-prefix label parse (1=ship, 0=background)"
+
+check("ingestion.filename_prefix", _test_ingestion_filename_prefix)
+
+
 def _test_grad_cam_batch():
     """Batched Grad-CAM (module_d_dashboard._grad_cam_batch) must exactly match
     the original one-forward-one-backward-per-detection algorithm (bit-for-bit,

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -55,28 +56,44 @@ def _find_image(
 ) -> Path | None:
     """Locate an image file by name under root.
 
+    `fname` may be a full filename ('img.jpg'), a sub-path ('train/img.jpg'),
+    or an already-stripped stem. The image cache is keyed by the *true* stem
+    (one suffix removed). Roboflow YOLO exports name files
+    'foo_jpg.rf.HASH.jpg', whose stem 'foo_jpg.rf.HASH' itself contains dots —
+    applying Path(...).stem to that a second time over-strips it to
+    'foo_jpg.rf' and misses the cache, silently dropping every annotation in
+    the dataset. So try the name **as given** first, then its stem.
+
     Uses cache for O(1) lookup when provided. Falls back to rglob only when
     cache is absent (avoid calling without cache on large datasets).
     """
-    stem = Path(fname).stem
     exts = _img_exts()
-    # 1. Exact path
+    stem = Path(fname).stem
+    bases = [fname] if stem == fname else [fname, stem]   # order-preserving, deduped
+
+    # 1. Exact path (fname may already carry an extension / sub-path)
     direct = root / fname
     if direct.exists():
         return direct
     # 2. Extension swap at root level
-    for ext in exts:
-        cand = root / (stem + ext)
-        if cand.exists():
-            return cand
-    # 3. Pre-built cache (fast)
+    for base in bases:
+        for ext in exts:
+            cand = root / (base + ext)
+            if cand.exists():
+                return cand
+    # 3. Pre-built cache (fast) — raw name (dotted Roboflow stem) then true stem
     if cache is not None:
-        return cache.get(stem)
+        for base in bases:
+            hit = cache.get(base)
+            if hit is not None:
+                return hit
+        return None
     # 4. Last resort: recursive scan (slow — only hit if no cache)
-    for ext in exts:
-        found = list(root.rglob(stem + ext))
-        if found:
-            return found[0]
+    for base in bases:
+        for ext in exts:
+            found = list(root.rglob(base + ext))
+            if found:
+                return found[0]
     return None
 
 
@@ -252,9 +269,10 @@ def parse_xml(
                 continue
             label = name_el.text.strip()
 
-            # Bbox — VOC <bndbox>, HRSC <box>/<Box>; HRSC also puts
+            # Bbox — VOC <bndbox>, HRSC <box>/<Box>, or rotated <robndbox>
+            # (SWIM wake/ship: <cx><cy><w><h><angle>). HRSC also puts
             # box_xmin/... directly on the object element itself.
-            bnd    = _find_first(obj, "bndbox", "box", "Box")
+            bnd    = _find_first(obj, "bndbox", "box", "Box", "robndbox")
             coords = bnd if bnd is not None else obj
 
             def _coord(*names) -> float | None:
@@ -272,11 +290,23 @@ def parse_xml(
             x2f = _coord("xmax", "box_xmax")
             y2f = _coord("ymax", "box_ymax")
             if x2f is None or y2f is None:
-                wf = _coord("w", "width")
-                hf = _coord("h", "height")
-                if None in (x1f, y1f, wf, hf):
+                cxf = _coord("cx")
+                cyf = _coord("cy")
+                wf  = _coord("w", "width")
+                hf  = _coord("h", "height")
+                if None not in (cxf, cyf, wf, hf):
+                    # Rotated box (robndbox): take the axis-aligned envelope of
+                    # the rotated rectangle. angle is in radians (0 if absent).
+                    ang    = _coord("angle") or 0.0
+                    c, s   = abs(math.cos(ang)), abs(math.sin(ang))
+                    half_w = (wf / 2.0) * c + (hf / 2.0) * s
+                    half_h = (wf / 2.0) * s + (hf / 2.0) * c
+                    x1f, y1f = cxf - half_w, cyf - half_h
+                    x2f, y2f = cxf + half_w, cyf + half_h
+                elif None not in (x1f, y1f, wf, hf):
+                    x2f, y2f = x1f + wf, y1f + hf   # corner + size
+                else:
                     continue
-                x2f, y2f = x1f + wf, y1f + hf
             if None in (x1f, y1f, x2f, y2f):
                 continue
             x1, y1, x2, y2 = int(x1f), int(y1f), int(x2f), int(y2f)
@@ -422,6 +452,39 @@ def parse_folder(root: Path, class_names: list[str] | None = None) -> list[dict]
                 "label":      label,
                 "area":       float("inf"),
             })
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Filename-prefix  (label encoded in the filename, whole image as ROI)
+# ---------------------------------------------------------------------------
+
+def parse_filename_prefix(
+    root: Path,
+    sep: str = "__",
+    label_index: int = 0,
+) -> list[dict]:
+    """Whole-image classification tiles whose label is baked into the filename.
+
+    The 'ships-in-satellite-imagery' dataset (shipsnet) has no annotation
+    files — its 80×80 tiles are named '<label>__<scene>__<lon>_<lat>.png', where
+    the leading field is 1 (ship) or 0 (no-ship). Splits each stem on `sep` and
+    uses field `label_index` as the label; the whole image is the ROI (no bbox).
+    """
+    exts    = _img_exts()
+    results = []
+    for img_path in sorted(root.rglob("*")):
+        if img_path.suffix.lower() not in exts:
+            continue
+        parts = img_path.stem.split(sep)
+        if len(parts) <= label_index or not parts[label_index].strip():
+            continue
+        results.append({
+            "image_path": img_path,
+            "bbox":       None,   # full image
+            "label":      parts[label_index].strip().lower(),
+            "area":       float("inf"),
+        })
     return results
 
 
