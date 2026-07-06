@@ -256,19 +256,22 @@ they persist across container restarts. GPU support requires uncommenting the
 
 ## Kaggle workflow
 
-The primary GPU execution environment is `REATS/notebooks/01_kaggle_full_pipeline.ipynb`.
-Run cells in order:
+The primary GPU execution environment is `REATS/notebooks/01_kaggle_full_pipeline.ipynb`,
+run natively as a Kaggle Notebook. Attach the datasets listed below via the right
+panel's **+ Add Input** before running `c-config` — see [`CLAUDE.md`](CLAUDE.md)'s
+"Kaggle notebook workflow" section for the full mount-path table. Run cells in order:
 
 | Cell | Purpose |
 |---|---|
+| `c-gpu` | Detect GPU, set `device` |
 | `c-install` | pip install all deps (streamlit, watchdog, pyngrok, …) |
 | `c-clone` | git clone/pull + clear `__pycache__` + evict stale modules |
-| `c-config` | Set dataset paths and hyperparameters |
-| `c-gpu` | Detect GPU, set `device` |
-| `c-ingest` | Run ingestion pipeline across all datasets |
-| `c-module-a` | Instantiate IRDetector, run detection smoke-test |
-| `c-module-b` | Train the 6-architecture ensemble (~18–24h on T4/P100) |
+| `c-config` | Set dataset mount paths, warm-start source, and hyperparameters |
+| `c-ingest` | Run ingestion pipeline across all attached datasets |
+| `c-train-single` / `c-train-ensemble` | Train ConvNeXt_tiny alone, or the full 6-architecture ensemble (~18–24h on T4/P100) |
+| `c-eval-metrics` | Test accuracy, ECE, per-domain breakdown |
 | `c-faithfulness` | Run GradCAM + faithfulness AUC evaluation |
+| `c-module-a` / `c-pipeline` | Module A detection demo + full A→B→C latency benchmark |
 | `c-dashboard` | Launch Streamlit + ngrok tunnel |
 
 ### Ingestion pipeline datasets
@@ -295,6 +298,14 @@ Pascal VOC XML, CSV, folder-per-class, and frame-sampled video sources:
 | `Vehicle_Dataset` | Folder | Vehicle dataset (car/truck/tank/APC) |
 | `Aerial_Segmentation` | Folder | Semantic segmentation of aerial imagery |
 | `Aerial_Roof_Seg` | Folder | Roof segmentation (contributes 0 annotations) |
+| `Ships_Satellite` | *(TBD)* | Ships in satellite imagery |
+| `SARScope_Maritime` | *(TBD)* | SAR maritime landscape |
+| `Thermal_Ships` | *(TBD)* | Thermal (genuinely IR) ship imagery |
+| `Aerial_Vehicle_Detection` | *(TBD)* | Aerial vehicle detection |
+| `Battle_Tank_UAV` | *(TBD)* | UAV/aerial battle-tank detection — targets the T72/Abrams/Leopard2/BMP2/Bradley/K21 GROUND-domain confusion |
+
+The 5 rows above (added 2026-07-05) have no confirmed format or `label_maps.yaml`
+entry yet — run `c-ingest` and read its UNMAPPED report before assuming either.
 
 Every generated image is tagged in `data/provenance.json` as `real`, `remapped`, or
 `synthetic` — the Kaggle notebook's provenance cell splits test accuracy by bucket,
