@@ -20,8 +20,27 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from torchvision import datasets, models, transforms
 import kornia.augmentation as K
-import mlflow
 from sklearn.metrics import precision_recall_fscore_support
+
+# mlflow is experiment-tracking only — optional. Importing this module (done by
+# the dashboard, smoke tests, metrics_report, and inference) must not hard-fail
+# when it's absent (e.g. a Kaggle image without it). Fall back to a no-op shim
+# so train_full_pipeline's mlflow.* calls run unchanged, just without logging.
+try:
+    import mlflow
+except ImportError:
+    import contextlib as _contextlib
+
+    class _NoMlflow:
+        def set_experiment(self, *a, **k): pass
+        def start_run(self, *a, **k): return _contextlib.nullcontext()
+        def log_params(self, *a, **k): pass
+        def log_param(self, *a, **k): pass
+        def log_metrics(self, *a, **k): pass
+
+    mlflow = _NoMlflow()
+    print("[module_b] mlflow not installed — training will run without "
+          "experiment logging (pip install mlflow to enable).")
 
 import sys as _sys
 from pathlib import Path as _Path
