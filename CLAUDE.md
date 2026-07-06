@@ -162,6 +162,7 @@ IR Frame
 **Module A** is pure PyTorch — no ultralytics at runtime. The `ultralytics` line in `requirements.txt` is only used by `verify_env.py`. `IRDetector.detect()` runs the full YOLOv4 forward pass + NMS internally. Training uses `MosaicDataset` which expects YOLO-format layout: `data/{split}/images/*.jpg` + `data/{split}/labels/*.txt` (class cx cy w h, normalised).  Default checkpoint: `checkpoints/detector_bootstrap.pt`. `IRDetector(weights=path)` raises `FileNotFoundError` if the path doesn't exist; only `weights=None` gives (intentionally) random init. Dashboard `load_pipeline()` likewise raises on any missing checkpoint — no silent random-weight fallback.
 
 **Module B training quirks**:
+- `mlflow` is an **optional** import — experiment tracking only. `module_b_classifier.py` falls back to a no-op shim (`_NoMlflow`) if it's not installed, so importing the module (the dashboard, `smoke_test.py`, `metrics_report.py`, and inference all do) never hard-fails on a Kaggle image that lacks it; `train_full_pipeline` just runs without logging. grad-cam/shap/lime in Module C are likewise all lazy-imported inside methods, so only a training run that actually logs needs the full XAI stack.
 - `train_one_epoch` accepts optional `scaler` (AMP GradScaler) and `ema` (ModelEMA) — both `None` by default
 - Validation and checkpointing only run from epoch `CONFIG["best_epoch_start"]` (225/300) — intentional per the paper
 - `compute_ece` accepts `is_probs=False`; set `True` when passing ensemble output (already softmax)
