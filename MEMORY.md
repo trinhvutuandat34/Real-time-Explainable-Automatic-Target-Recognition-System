@@ -118,6 +118,19 @@ Naval reality check: even with SARScope + Thermal_Ships + Ships_Vessels_Aerial +
 
 ---
 
+## CPU-only training pipeline (2026-07-06 — user has no GPU quota, must train on CPU)
+
+The user ran out of GPU quota and needs to train entirely on CPU ("base" Kaggle). The paper schedule (ConvNeXt_tiny × 300 epochs, checkpoint from epoch 225, then a 6-arch ensemble) is infeasible on CPU, so added a CPU profile rather than changing the paper-faithful defaults.
+
+- **`module_b_classifier.cpu_config(base=CONFIG, epochs=20)`** — returns a CPU-tuned copy: `epochs=20`, **`best_epoch_start=1`** (the default 225 would train and save *nothing* on a short run — real footgun), `ema_decay=0.999` (0.9999 barely moves over few epochs, and validation/checkpointing use the EMA weights, so val_acc would stay ~init and never checkpoint), `batch=16`, `num_workers=2`, `device=cpu`. Does not mutate `base`.
+- **`build_loaders`** now reads `num_workers` from cfg and gates `pin_memory` on `torch.cuda.is_available()` (the earlier `pin_memory=True` warning on CPU).
+- **Notebook**: `c-train-single` branches on `device` — CPU trains a single pretrained **ResNet18** (fastest of the six) via `cpu_config`; GPU keeps the ConvNeXt path. `c-train-ensemble` **skips on CPU** (sets `USE_ENSEMBLE=False`). `c-eval-metrics` had a latent bug: it hardcoded `build_convnext` for the single-model path — loading ResNet18 weights into a ConvNeXt would crash — now rebuilds by the checkpoint's stored `arch` key.
+- **Grad-CAM arch bug surfaced by the ResNet18 switch (fixed):** all three CAM explainers in `module_c_xai` defaulted their target layer to `model.features[-1][-1]`, which ResNet/ResNeXt lack (`.layer4`), so `c-gradcam`/`c-faithfulness` would `AttributeError` on the CPU model. Added `_last_conv_layer(model)` — prefers `features[-1][-1]` when present (preserves ConvNeXt behaviour exactly), else walks to the last `Conv2d`. Regression: `smoke_test.py::module_c.generic_target_layer`.
+- **Known CPU limitations (not crashes):** MC-Dropout uncertainty is ~0 on ResNet18 (no `nn.Dropout` layers — only predictive entropy is meaningful); MultiViewpointAugmentor's 5 grid-sample/conv ops run on CPU per batch (main speed cost — lower `CPU_EPOCHS` or `MultiViewpointAugmentor(p_scale=...)` if too slow). A subset-per-class cap for faster first runs was considered but left out to keep it simple; the `CPU_EPOCHS` knob is the intended throttle.
+- **Verification gap:** could not run a live CPU train here — `torch` won't install in this sandbox (pytorch.org index blocked via proxy; PyPI wheel too large/slow). Validated `cpu_config` (unit test, base unmutated), all edited cells parse, `_last_conv_layer` logic + smoke check, and traced the full CPU path (train→checkpoint→arch-aware reload→XAI) by hand. The train loop itself is pre-existing CPU-capable code (the `scaler is None` branch, already exercised by the smoke suite's CPU checks). User should do a `CPU_EPOCHS=1` smoke pass first to confirm end-to-end before a full run.
+
+---
+
 ## Kaggle run results (2026-07-04, `real-time-ex-03`, Tesla T4)
 
 Full report: `docs/gap_analysis_report.md`'s sibling Kaggle report (not committed to this repo as of this entry — summarized here so it isn't lost). Single ConvNeXt_tiny only (300 epochs); the notebook's auto-logic skips the 6-architecture ensemble once a single model clears 92%.

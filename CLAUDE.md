@@ -81,6 +81,11 @@ cd REATS && python modules/module_b_classifier.py
 # ViT_b_16, Swin_T, VGG16, ResNet18 — one model per architecture, not 6 seeds of one)
 cd REATS && python -c "from modules.module_b_classifier import train_ensemble, CONFIG; train_ensemble(CONFIG)"
 
+# CPU-only training ("base" Kaggle, no accelerator) — single pretrained ResNet18
+# on a short schedule that actually checkpoints. The 300-epoch / 6-arch schedule
+# needs a GPU; cpu_config() trims epochs→20, best_epoch_start→1, ema→0.999, etc.
+cd REATS && python -c "from modules.module_b_classifier import train_full_pipeline, cpu_config, CONFIG; train_full_pipeline(cpu_config(CONFIG, epochs=20), arch='resnet18', ckpt_path='checkpoints/convnext_best.pth')"
+
 # Hard-negative mining + fine-tune pass on confusable classes (F16/MiG19/MiG21)
 cd REATS && python modules/hard_negative_mining.py --checkpoint checkpoints/convnext_tiny_0.pth --arch convnext_tiny
 
@@ -162,6 +167,7 @@ IR Frame
 **Module A** is pure PyTorch — no ultralytics at runtime. The `ultralytics` line in `requirements.txt` is only used by `verify_env.py`. `IRDetector.detect()` runs the full YOLOv4 forward pass + NMS internally. Training uses `MosaicDataset` which expects YOLO-format layout: `data/{split}/images/*.jpg` + `data/{split}/labels/*.txt` (class cx cy w h, normalised).  Default checkpoint: `checkpoints/detector_bootstrap.pt`. `IRDetector(weights=path)` raises `FileNotFoundError` if the path doesn't exist; only `weights=None` gives (intentionally) random init. Dashboard `load_pipeline()` likewise raises on any missing checkpoint — no silent random-weight fallback.
 
 **Module B training quirks**:
+- `cpu_config(base=CONFIG, epochs=20)` returns a CPU-only training profile: the paper's 300-epoch / checkpoint-from-225 / 6-architecture schedule needs a GPU, so on a no-accelerator ("base" Kaggle) box it trims `epochs→20`, `best_epoch_start→1` (the default 225 would save **no** checkpoint on a short run), `ema_decay→0.999` (0.9999 barely moves over few epochs, and validation/checkpointing run on the EMA weights), `batch→16`, `num_workers→2`. Pair with a light arch: `train_full_pipeline(cpu_config(CONFIG), arch="resnet18")` — ResNet18 is the fastest of the six. `build_loaders` reads `num_workers` from the cfg and gates `pin_memory` on `torch.cuda.is_available()`. Grad-CAM's default target layer is now the model's last `Conv2d` (via `module_c_xai._last_conv_layer`), not `model.features[-1][-1]`, so it doesn't crash on ResNet-style models that lack `.features`.
 - `mlflow` is an **optional** import — experiment tracking only. `module_b_classifier.py` falls back to a no-op shim (`_NoMlflow`) if it's not installed, so importing the module (the dashboard, `smoke_test.py`, `metrics_report.py`, and inference all do) never hard-fails on a Kaggle image that lacks it; `train_full_pipeline` just runs without logging. grad-cam/shap/lime in Module C are likewise all lazy-imported inside methods, so only a training run that actually logs needs the full XAI stack.
 - `train_one_epoch` accepts optional `scaler` (AMP GradScaler) and `ema` (ModelEMA) — both `None` by default
 - Validation and checkpointing only run from epoch `CONFIG["best_epoch_start"]` (225/300) — intentional per the paper
@@ -246,7 +252,7 @@ Force-adding `.gitkeep` files requires `git add -f`; ordinary `git add` will ign
 | Faithfulness AUC | ≥ 0.80 |
 | FPS | ≥ 20 |
 
-Single ConvNeXt_tiny achieves ~90.25%; the 6-model softmax ensemble pushes to ~92%. Latency and FPS targets require GPU — CPU numbers are for architecture validation only.
+Single ConvNeXt_tiny achieves ~90.25%; the 6-model softmax ensemble pushes to ~92%. Latency and FPS targets require GPU — CPU numbers are for architecture validation only. **Training** these targets also assumes a GPU; the CPU-only path (`cpu_config`, single ResNet18, ~20 epochs — see Module B quirks) produces a working baseline for a machine with no accelerator, not the 92% figure.
 
 The paper gives no FAR/MR target — these are the professor's additional battlefield-threat-analysis requirement (see `modules/threat_metrics.py`), reported alongside the paper's metrics but not scored against a pass/fail threshold.
 

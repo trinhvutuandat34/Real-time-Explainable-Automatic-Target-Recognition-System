@@ -69,6 +69,34 @@ CONFIG = {
 }
 
 
+def cpu_config(base: dict = CONFIG, epochs: int = 20) -> dict:
+    """Return a copy of a CONFIG dict tuned for CPU-only ("base" Kaggle) training.
+
+    The paper schedule — ConvNeXt_tiny for 300 epochs, checkpoint only from
+    epoch 225, then a 6-architecture ensemble — assumes a GPU and is infeasible
+    on CPU. This profile lets a single *pretrained* lightweight model finetune in
+    a few CPU-hours and actually produce a checkpoint:
+      * epochs           → `epochs` (default 20 — a pretrained backbone needs few)
+      * best_epoch_start → 1       (the default 225 would save NOTHING at <225 ep)
+      * ema_decay        → 0.999   (0.9999 barely moves over a short run, and
+                                    validation/checkpointing use the EMA weights)
+      * warmup_epochs / batch_size / num_workers trimmed for a small CPU box
+
+    Pair with a lightweight architecture, e.g.
+        train_full_pipeline(cpu_config(CONFIG), arch="resnet18")
+    ResNet18 is the fastest of the six architectures.
+    """
+    c = dict(base)
+    c["device"]           = "cpu"
+    c["epochs"]           = epochs
+    c["best_epoch_start"] = 1
+    c["warmup_epochs"]    = min(base.get("warmup_epochs", 10), 2)
+    c["batch_size"]       = min(base.get("batch_size", 128), 16)
+    c["ema_decay"]        = 0.999
+    c["num_workers"]      = 2
+    return c
+
+
 # ---------------------------------------------------------------------------
 # Augmentation
 # ---------------------------------------------------------------------------
@@ -228,7 +256,8 @@ def build_loaders(cfg: dict = CONFIG) -> Tuple[DataLoader, DataLoader, DataLoade
     root = Path(cfg["data_root"])
     # pin_memory only helps host→CUDA copies; on CPU-only ("base" Kaggle) it is
     # a no-op that just prints a warning, so gate it on CUDA availability.
-    kw   = dict(batch_size=cfg["batch_size"], num_workers=4,
+    # num_workers is configurable (cpu_config trims it for a small CPU box).
+    kw   = dict(batch_size=cfg["batch_size"], num_workers=cfg.get("num_workers", 4),
                 pin_memory=torch.cuda.is_available())
     return (
         DataLoader(datasets.ImageFolder(root / "train", transform=base_tf), shuffle=True,  **kw),

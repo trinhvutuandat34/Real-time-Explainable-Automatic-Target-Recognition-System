@@ -273,6 +273,28 @@ def _test_module_c_mcdropout():
 check("module_c.mc_dropout", _test_module_c_mcdropout)
 
 
+def _test_xai_generic_target_layer():
+    """Grad-CAM's default target must work for models without a `.features`
+    attribute. ResNet18 — the CPU-profile single model — uses `.layer4`, so the
+    old `model.features[-1][-1]` default raised AttributeError and crashed
+    c-gradcam / c-faithfulness on CPU. `_last_conv_layer` walks to the final
+    Conv2d for those, while still preferring `features[-1][-1]` when present."""
+    import torch.nn as nn
+    from modules.module_c_xai import _last_conv_layer
+
+    # No `.features`: fall back to the last Conv2d in module order.
+    m1 = nn.Sequential(nn.Conv2d(3, 8, 3), nn.ReLU(), nn.Conv2d(8, 16, 3))
+    assert _last_conv_layer(m1) is m1[2], "should pick the last Conv2d"
+
+    # Has `.features`: preserve the original ConvNeXt-style choice exactly.
+    m2 = nn.Module()
+    m2.features = nn.Sequential(nn.Sequential(nn.Conv2d(3, 4, 3)))
+    assert _last_conv_layer(m2) is m2.features[-1][-1], "should prefer features[-1][-1]"
+    return "generic last-Conv2d target for ResNet-style models"
+
+check("module_c.generic_target_layer", _test_xai_generic_target_layer)
+
+
 # ---------------------------------------------------------------------------
 # 5b. Threat metrics / hard-negative mining / operational policy
 # ---------------------------------------------------------------------------

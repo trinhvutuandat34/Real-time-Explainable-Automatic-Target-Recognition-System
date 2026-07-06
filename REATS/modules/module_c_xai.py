@@ -41,15 +41,40 @@ class MCDropoutWrapper(nn.Module):
         return {"mean_probs": mean_probs, "uncertainty": entropy, "all_probs": all_probs}
 
 
+def _last_conv_layer(model: nn.Module) -> nn.Module:
+    """Best-effort default Grad-CAM target: the last Conv2d in the model.
+
+    ConvNeXt/VGG expose `model.features[-1][-1]`, but ResNet/ResNeXt use
+    `.layer4` and there is no single attribute that works across all six
+    architectures — so a single ResNet18 (the CPU-profile model) would crash
+    the `.features[-1][-1]` default. Prefer `features[-1][-1]` when present to
+    preserve the original ConvNeXt behaviour exactly, else walk modules for the
+    final Conv2d (architecture-generic; for ViT/Swin it lands on the
+    patch-embed stem — not semantically deep, but it does not crash)."""
+    feats = getattr(model, "features", None)
+    if feats is not None:
+        try:
+            return feats[-1][-1]
+        except (TypeError, IndexError, KeyError):
+            pass
+    last = None
+    for m in model.modules():
+        if isinstance(m, nn.Conv2d):
+            last = m
+    if last is None:
+        raise ValueError("no Conv2d layer found for a Grad-CAM target")
+    return last
+
+
 class GradCAMExplainer:
-    """Grad-CAM heatmaps via pytorch-grad-cam. Defaults to last ConvNeXt stage."""
+    """Grad-CAM heatmaps via pytorch-grad-cam. Defaults to the model's last Conv2d."""
 
     def __init__(self, model: nn.Module, target_layer: Optional[nn.Module] = None):
         from pytorch_grad_cam import GradCAM
         from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
         self._Target = ClassifierOutputTarget
         self._model  = model
-        layer        = target_layer if target_layer is not None else model.features[-1][-1]
+        layer        = target_layer if target_layer is not None else _last_conv_layer(model)
         # GradCAM needs grads to flow through the model parameters even at inference
         for p in model.parameters():
             p.requires_grad_(True)
@@ -74,7 +99,7 @@ class GradCAMPlusPlusExplainer:
         from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
         self._Target = ClassifierOutputTarget
         self._model  = model
-        layer        = target_layer if target_layer is not None else model.features[-1][-1]
+        layer        = target_layer if target_layer is not None else _last_conv_layer(model)
         for p in model.parameters():
             p.requires_grad_(True)
         self.cam     = GradCAMPlusPlus(model=model, target_layers=[layer])
@@ -94,7 +119,7 @@ class EigenCAMExplainer:
         from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
         self._Target = ClassifierOutputTarget
         self._model  = model
-        layer        = target_layer if target_layer is not None else model.features[-1][-1]
+        layer        = target_layer if target_layer is not None else _last_conv_layer(model)
         for p in model.parameters():
             p.requires_grad_(True)
         self.cam     = EigenCAM(model=model, target_layers=[layer])
