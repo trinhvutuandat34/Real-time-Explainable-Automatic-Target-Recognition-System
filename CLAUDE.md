@@ -15,6 +15,10 @@ The two systems use **different class taxonomies**:
 - **REATS**: 43-class taxonomy (AIR / GROUND / NAVAL) defined in `REATS/config/targets.yaml` — single source of truth; all modules load from it automatically
 - **cadet_atr**: `fixed_wing, rotary_wing, uav, vessel, vehicle_ground, vehicle_apc` (mapped to REATS classes via `ingestion/label_maps.yaml`)
 
+**Before assuming this file is exhaustive, check:**
+- `MEMORY.md` — running log of architectural decisions, bug fixes, and session state across prior Claude Code sessions; the source of truth for what's currently in-flight, recently broken, or pending (e.g. unmapped datasets, unrepeated GPU runs)
+- `docs/gap_analysis_report.md` / `docs/gap_analysis_slides.md` — paper-vs-implementation gap analysis (ensemble heterogeneity, FAR/MR, hard-negative mining, operational policy), each gap grounded in a citation from Do et al. (2025)
+
 ---
 
 ## Local development environment
@@ -112,6 +116,12 @@ python run_experiment.py --mode full
 
 ---
 
+## Testing notes
+
+Neither codebase uses pytest/unittest. Each has one `smoke_test.py` — a flat script of sequential `check(name, fn)` calls (dotted names like `module_b.full_aug_pipeline`, `threat_policy.map_confidence`) with no `if __name__ == "__main__":` guard, so importing the module runs every check and then calls `sys.exit()`. There is no CLI flag to run a single check; to isolate one, either comment out the other `check(...)` calls at the bottom of the file, or copy the target `_test_*()` function's body into a `python -c` snippet with its own imports. `grep -n '^check(' REATS/smoke_test.py` lists all available check names. REATS's suite has ~22 checks (config, both classifiers, XAI, ingestion wrapper-dir descent, Grad-CAM batching, end-to-end latency); cadet_atr's is smaller (config/data/models/adaptation only).
+
+---
+
 ## REATS architecture
 
 ```
@@ -125,6 +135,8 @@ IR Frame
                                           train_full_pipeline() for one model
                                           train_ensemble() for all 6
                                           TemperatureScaler for post-hoc ECE calibration
+                                          augmentation_viewpoint.py — MultiViewpointAugmentor,
+                                          5 UAV/FLIR-physics transforms chained before Kornia aug
                                           hard_negative_mining.py — extra fine-tune pass
                                           on confusable classes (F16/MiG19/MiG21)
   └─► Module C  module_c_xai.py          GradCAM / GradCAM++ / EigenCAM (pytorch-grad-cam)
@@ -157,6 +169,7 @@ IR Frame
 - `preprocess_roi(roi)` converts a BGR/grayscale uint8 ROI to a normalized `(1, 3, 224, 224)` tensor via pure cv2 (no PIL round-trip, ~6× faster) — this is the real-time path used by Module D's iPhone Live Feed tab
 - `ece_from_arrays(conf, correct, n_bins)` is the vectorised binning core of `compute_ece` (numpy `searchsorted` instead of an O(bins × N) Python list-comprehension scan per bin) — fuzz-tested to match the original `(lo, hi]`-inclusive binning exactly. `metrics_report.py`'s `collect_predictions()` reuses it: accuracy, ECE, and FAR/MR are all derived from a **single** inference pass over the val/test loader (previously 3 separate passes — 3× the ensemble forward-pass cost for no reason, since none of those three metrics need a second look at the data).
 - `ARCHITECTURES = ["convnext_tiny", "resnext50", "vit_b_16", "swin_t", "vgg16", "resnet18"]` — the 6 architectures required by Do et al. (2025); `build_model(arch, num_classes, pretrained)` dispatches to the right builder. `train_ensemble(cfg, architectures=None)` trains one model per architecture (default: all 6) instead of 6 seeds of one architecture — each checkpoint saves its `arch` under the `"arch"` key so `load_ensemble()` / dashboard `load_pipeline()` reconstruct the right network per file. Checkpoints saved before this field existed default to `convnext_tiny` for backward compatibility.
+- `train_full_pipeline`'s `aug_pipeline` chains `MultiViewpointAugmentor()` (`augmentation_viewpoint.py`) before `KorniaAugmentPipeline()` — 5 default-on probabilistic transforms modeling UAV/FLIR sensor physics rather than generic image augmentation: `ElevationForeshortening` (oblique-angle compression), `AltitudeVariance` (apparent target scale at high/low altitude, including zoom-out cases standard `RandomResizedCrop` never produces), `ThermalBloom` (hot-target heat bleed), `AtmosphericScintillation` (low-altitude heat shimmer), `IRFixedPatternNoise` (FPA row/column noise + dead pixels). Pass `MultiViewpointAugmentor(p_scale=...)` to uniformly scale every transform's activation probability (e.g. `0.5` for lighter aug).
 
 **Hard negative mining** (`modules/hard_negative_mining.py`): addresses classes the confusion matrix shows bleeding into each other. `CONFUSABLE_GROUPS` has 3 entries: `{F16, MiG19, MiG21}` (the KCI paper's own confusion matrix — similar fighter silhouettes) and, added after the 2026-07-04 Kaggle GPU run reproduced it on the full 43-class taxonomy, `{BMP2, Bradley, K21}` (IFV/APC bleed) and `{T72, T90, Leopard2}` (MBT bleed) — together these drove GROUND-domain accuracy to 85.2% vs 95.7%/99.75% for AIR/NAVAL that run. `mine_hard_negatives(model, dataset, device)` flags samples that are misclassified or have a low top1/top2 softmax margin, restricted to those groups. When the dataset exposes labels without image loading (ImageFolder `.targets`/`.samples`), mining only decodes and forward-passes the confusable-class subset — ~93% of inference skipped for 3 confusable classes out of 43 (now proportionally more with 9 confusable classes across 3 groups). `HardNegativeDataset` oversamples the flagged indices; `finetune_on_hard_negatives(...)` runs a short low-LR pass on top of an already-trained checkpoint — it is a post-hoc addition to the normal 300-epoch schedule, not a replacement for it.
 
