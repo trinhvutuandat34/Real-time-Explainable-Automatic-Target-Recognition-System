@@ -55,28 +55,44 @@ def _find_image(
 ) -> Path | None:
     """Locate an image file by name under root.
 
+    `fname` may be a full filename ('img.jpg'), a sub-path ('train/img.jpg'),
+    or an already-stripped stem. The image cache is keyed by the *true* stem
+    (one suffix removed). Roboflow YOLO exports name files
+    'foo_jpg.rf.HASH.jpg', whose stem 'foo_jpg.rf.HASH' itself contains dots —
+    applying Path(...).stem to that a second time over-strips it to
+    'foo_jpg.rf' and misses the cache, silently dropping every annotation in
+    the dataset. So try the name **as given** first, then its stem.
+
     Uses cache for O(1) lookup when provided. Falls back to rglob only when
     cache is absent (avoid calling without cache on large datasets).
     """
-    stem = Path(fname).stem
     exts = _img_exts()
-    # 1. Exact path
+    stem = Path(fname).stem
+    bases = [fname] if stem == fname else [fname, stem]   # order-preserving, deduped
+
+    # 1. Exact path (fname may already carry an extension / sub-path)
     direct = root / fname
     if direct.exists():
         return direct
     # 2. Extension swap at root level
-    for ext in exts:
-        cand = root / (stem + ext)
-        if cand.exists():
-            return cand
-    # 3. Pre-built cache (fast)
+    for base in bases:
+        for ext in exts:
+            cand = root / (base + ext)
+            if cand.exists():
+                return cand
+    # 3. Pre-built cache (fast) — raw name (dotted Roboflow stem) then true stem
     if cache is not None:
-        return cache.get(stem)
+        for base in bases:
+            hit = cache.get(base)
+            if hit is not None:
+                return hit
+        return None
     # 4. Last resort: recursive scan (slow — only hit if no cache)
-    for ext in exts:
-        found = list(root.rglob(stem + ext))
-        if found:
-            return found[0]
+    for base in bases:
+        for ext in exts:
+            found = list(root.rglob(base + ext))
+            if found:
+                return found[0]
     return None
 
 

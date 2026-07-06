@@ -368,6 +368,30 @@ def _test_ingestion_wrapper_dir_descent():
 check("ingestion.wrapper_dir_descent", _test_ingestion_wrapper_dir_descent)
 
 
+def _test_ingestion_roboflow_stem_lookup():
+    """Roboflow YOLO exports name files 'foo_jpg.rf.HASH.jpg'; the image cache
+    is keyed by the true stem 'foo_jpg.rf.HASH'. _find_image must not apply
+    Path().stem a second time to an already-stripped name — that over-strips
+    the '.HASH' segment, misses the cache, and silently drops 100% of a
+    Roboflow dataset's annotations (Kaggle run 2026-07-06: Ships_Vessels_Aerial
+    13,435 anns → 0 mapped, folder-fell-back to the label 'images'). Plain
+    'name.jpg' filenames must still resolve to their stem key."""
+    from pathlib import Path as _P
+    from ingestion.formats import _find_image
+
+    dotted = "ship042_jpg.rf.9a8b7c6d5e"        # == txt_path.stem for the .txt label
+    cache  = {dotted: _P("/data") / f"{dotted}.jpg"}
+    assert _find_image(_P("/nope"), dotted, cache=cache) is not None, \
+        "dotted Roboflow stem missed the cache"
+
+    cache2 = {"FLIR_08863": _P("/d/FLIR_08863.jpg")}   # cache keyed by true stem
+    assert _find_image(_P("/nope"), "FLIR_08863.jpg", cache=cache2) is not None, \
+        "plain full filename failed to resolve to its stem"
+    return "dotted Roboflow stems + plain filenames both resolve"
+
+check("ingestion.roboflow_stem_lookup", _test_ingestion_roboflow_stem_lookup)
+
+
 def _test_grad_cam_batch():
     """Batched Grad-CAM (module_d_dashboard._grad_cam_batch) must exactly match
     the original one-forward-one-backward-per-detection algorithm (bit-for-bit,
