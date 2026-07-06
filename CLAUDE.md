@@ -266,19 +266,17 @@ Two services share one image (`Dockerfile` builds from `REATS/requirements.txt` 
 
 ---
 
-## Colab notebook workflow (`notebooks/01_kaggle_full_pipeline.ipynb`)
+## Kaggle notebook workflow (`notebooks/01_kaggle_full_pipeline.ipynb`)
 
-Despite the filename, this notebook now targets **Google Colab**, not Kaggle — it was ported (2026-07-05) after Kaggle's own dataset-mount panel (`+ Add input`) turned out to have no Colab equivalent. Filename kept as-is (renaming would ripple through this doc, README, and MEMORY.md for no functional benefit); "Kaggle" in the name now just reflects that the datasets still come *from* Kaggle, via the API instead of a mount.
+Runs natively as a Kaggle Notebook — `/kaggle/working` for writable output, `/kaggle/input` for read-only mounted datasets. (It briefly targeted Google Colab instead, 2026-07-05 to 2026-07-06, via a `kagglehub`-download cell standing in for Kaggle's own mount panel; reverted back to native Kaggle since Colab has no equivalent of Kaggle's **+ Add Input** panel and the download step just duplicated data Kaggle already serves for free via a mount.)
 
-Run cells in order: `c-gpu` → `c-install` → `c-clone` → `c-kaggle-data` → `c-config` → `c-ingest` → `c-module-b` (or `c-train-ensemble`) → `c-faithfulness` → `c-dashboard`.
+Run cells in order: `c-gpu` → `c-install` → `c-clone` → `c-config` → `c-ingest` → `c-module-b` (or `c-train-ensemble`) → `c-faithfulness` → `c-dashboard`.
 
-**Dataset access — `c-kaggle-data`:** Colab has no input-mount panel, so this cell authenticates against Kaggle and pulls every dataset via **`kagglehub.dataset_download(handle)`** — not the `kaggle` CLI. Two credential styles are tried in order (added 2026-07-05 after Kaggle demoted `kaggle.json` to "Legacy API Credentials" and made the unified token the default on the API settings page): (1) Colab Secret `KAGGLE_API_TOKEN` (format `KGAT_...`, from kaggle.com/settings → API → "Create New Token") → `~/.kaggle/access_token`; (2) legacy Colab Secrets `KAGGLE_USERNAME`/`KAGGLE_KEY`, or an interactive `kaggle.json` upload prompt as the last-resort fallback. Never echo a real token/key value in a print statement — both are read into env vars / files only, never interpolated into cell output. `kagglehub` auto-caches under `~/.cache/kagglehub/` and returns each dataset's local path directly, so re-running the cell is free for anything already downloaded. `KAGGLE_DATASET_HANDLES` values can be a single handle or a list of handles tried in order (first success wins) — used for `FLIR_ADAS_v2` and `HRSC2016`, which each have a fallback mirror in case the primary is renamed/pulled. `DATASET_INPUTS` is built entirely in this cell (`{key: Path(local_path)}`); a key whose every handle fails gets a placeholder path that never exists (removed if the failed download left an empty dir) so downstream `.exists()` checks in `c-config`/`c-ingest` correctly treat it as missing — **`c-config` must never reconstruct `DATASET_INPUTS` itself** (an earlier version did, from a shared `/content/datasets/<key>` directory that doesn't exist once kagglehub manages its own per-dataset cache path — this silently clobbered every real path and made every dataset look missing; caught via a mock-exec test, not by inspection).
+**Dataset access — Kaggle "+ Add Input":** attach each dataset in the table below via the right panel's **+ Add Input** search before running `c-config`. Kaggle mounts a regular user's dataset read-only at `/kaggle/input/datasets/<owner>/<slug>/`; an **organization**-owned dataset (e.g. Airbus) mounts one level deeper, at `/kaggle/input/datasets/organizations/<org>/<slug>/` — this asymmetry isn't documented anywhere obvious on Kaggle's side and will silently make an `.exists()` check fail if you assume the regular-user path for an org account. A previous run's checkpoints, attached the same way (**+ Add Input** → Notebook Output), mount at `/kaggle/input/notebooks/<owner>/<kernel-slug>/`. `c-config` builds `DATASET_INPUTS` directly from these fixed paths (no download step, no credentials needed at runtime) — a key whose dataset isn't attached yet just gets a path that doesn't exist, and `c-ingest` already treats that as "skip, fall back to synthetic," so nothing breaks if you haven't attached everything yet.
 
-The `kaggle` CLI (still installed alongside `kagglehub`) is kept for exactly one thing: `c-config`'s `WARM_START_KERNEL` step downloads a previous run's checkpoints via `kaggle kernels output <owner>/<kernel-slug>` — kagglehub has no kernel-output equivalent, only dataset/model downloads.
+**Dataset keys (21 total; 5 new relative to the original Kaggle-mounted 15, plus `Airbus_Aircraft` restored as its own key):**
 
-**Dataset keys (20 total; 5 new relative to the original Kaggle-mounted 15):**
-
-| Key | Kaggle handle(s) | Domain |
+| Key | Kaggle handle | Domain |
 |---|---|---|
 | `FLIR_Thermal` | `deepnewbie/flir-thermal-images-dataset` | thermal IR |
 | `FLIR_ADAS_v2` | `samdazel/teledyne-flir-adas-thermal-dataset-v2` → fallback `rajababuadigarla/teledyne-flir-free-adas-thermal-dataset-v2` | thermal IR |
@@ -293,19 +291,23 @@ The `kaggle` CLI (still installed alongside `kagglehub`) is kept for exactly one
 | `SWIM` | `lilitopia/swimship-wake-imagery-mass` | naval |
 | `SARScope_Maritime` *(new)* | `kailaspsudheer/sarscope-unveiling-the-maritime-landscape` | naval |
 | `Thermal_Ships` *(new)* | `houssemhammami525/thermal-ships` | naval (genuinely IR, unlike most "aerial" sets above) |
-| `CGI_Planes` | `airbusgeo/airbus-aircrafts-sample-dataset` | air |
+| `CGI_Planes` | `aceofspades914/cgi-planes-in-satellite-imagery-w-bboxes` | air |
+| `Airbus_Aircraft` *(restored)* | `airbusgeo/airbus-aircrafts-sample-dataset` — **organization** account, mounts under `datasets/organizations/` | air |
 | `SwimmingPool_Car` | `kbhartiya83/swimming-pool-and-car-detection` | ground |
 | `Vehicle_Dataset` | `alpereniek/vehicle-detection-from-satellite-images-data-set` | ground |
 | `Aerial_Vehicle_Detection` *(new)* | `llpukojluct/aerial-vehicle-detection-dataset` | ground |
 | `Battle_Tank_UAV` *(new)* | `simuletic/uav-and-aerial-view-battle-tank-detection-dataset` | ground — targets the T72/Abrams/Leopard2/BMP2/Bradley/K21 confusion (see `hard_negative_mining.CONFUSABLE_GROUPS`) |
 | `Aerial_Segmentation` | `humansintheloop/semantic-segmentation-of-aerial-imagery` | mixed |
 | `Aerial_Roof_Seg` | `atilol/aerialimageryforroofsegmentation` | (null labels — contributes 0 annotations) |
+| notebook output `trnhvtunt/real-time-ex-03` | warm-start checkpoints | — |
+
+**`CGI_Planes` / `Airbus_Aircraft` split (found 2026-07-06):** the Colab port had collapsed these into a single `CGI_Planes` key pointing at the `airbusgeo` handle, silently dropping the original `aceofspades914` CGI_Planes dataset. Both already had complete `ingestion/label_maps.yaml` entries from before the merge, so restoring the second key was a pure notebook/doc fix — no new label-mapping work needed.
 
 **The 5 new keys have no `ingestion/label_maps.yaml` entry yet** — inventing one without inspecting each dataset's actual raw label strings would risk silently mis-mapping classes (exactly the failure mode `_resolve_label`'s **UNMAPPED** report exists to catch). Run `c-ingest`, read its UNMAPPED report, and add real entries from there.
 
 ### Known pitfalls
 
-**Stale bytecode (most common issue):** the Colab kernel caches `.pyc` files across cell re-runs. After a `git pull` the old compiled bytecode runs, not the new source. The `c-clone` cell clears this automatically:
+**Stale bytecode (most common issue):** the Kaggle kernel caches `.pyc` files across cell re-runs. After a `git pull` the old compiled bytecode runs, not the new source. The `c-clone` cell clears this automatically:
 ```python
 for _cache in ROOT.rglob('__pycache__'):
     shutil.rmtree(_cache, ignore_errors=True)
@@ -342,7 +344,7 @@ except NameError:
 
 ### Dataset keys and formats
 
-The pipeline maps `DATASET_INPUTS` dict keys to `label_maps.yaml` entries. Kaggle handles for each key (now fetched via kagglehub, not a filesystem mount — see "Colab notebook workflow" above for the full list including the 5 newer keys) live in the notebook's `c-kaggle-data` cell, not here, so this table doesn't drift out of sync with it.
+The pipeline maps `DATASET_INPUTS` dict keys to `label_maps.yaml` entries. Kaggle handles/mount paths for each key (see "Kaggle notebook workflow" above for the full list, including the 5 newer keys and the restored `Airbus_Aircraft` key) live in the notebook's `c-config` cell, not here, so this table doesn't drift out of sync with it.
 
 | Key | Format |
 |-----|--------|
@@ -357,6 +359,7 @@ The pipeline maps `DATASET_INPUTS` dict keys to `label_maps.yaml` entries. Kaggl
 | `Ships_Vessels_Aerial` | csv |
 | `SWIM` | folder |
 | `CGI_Planes` | folder |
+| `Airbus_Aircraft` | csv |
 | `SwimmingPool_Car` | folder |
 | `Vehicle_Dataset` | folder |
 | `Aerial_Segmentation` | folder |
@@ -378,10 +381,10 @@ Some COCO JSONs use `filename` (no underscore) or `path` instead of the standard
 
 ---
 
-## Dashboard deployment (Colab → browser/mobile)
+## Dashboard deployment (Kaggle → browser/mobile)
 
 ```python
-# In a Colab cell — start Streamlit + ngrok tunnel
+# In a Kaggle cell — start Streamlit + ngrok tunnel
 import subprocess, time, pyngrok.ngrok as ngrok
 
 proc = subprocess.Popen(["streamlit", "run", str(REATS/"modules/module_d_dashboard.py"),
@@ -400,18 +403,16 @@ print("Dashboard:", tunnel.public_url)
 
 **iPhone Live without same WiFi:** Use Cloudflare Tunnel for the mobile MJPEG streamer (free, no account needed):
 ```bash
-# On the Colab GPU runtime
+# On the Kaggle GPU runtime
 curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
 chmod +x cloudflared
 ./cloudflared tunnel --url http://localhost:5000 --no-autoupdate
 ```
 Paste the `*.trycloudflare.com` URL into Dashboard → iPhone Live URL field.
 
-**Security:** Never commit ngrok or Kaggle tokens. Use **Colab Secrets** (left sidebar → 🔑 icon) for both:
+**Security:** Never commit an ngrok token. Use **Kaggle Secrets** (Add-ons → Secrets) instead:
 ```python
-from google.colab import userdata
-NGROK_TOKEN = userdata.get('NGROK_AUTHTOKEN')
-os.environ['KAGGLE_USERNAME'] = userdata.get('KAGGLE_USERNAME')
-os.environ['KAGGLE_KEY']      = userdata.get('KAGGLE_KEY')
+from kaggle_secrets import UserSecretsClient
+NGROK_TOKEN = UserSecretsClient().get_secret('NGROK_AUTHTOKEN')
 ```
-Reset any exposed token immediately at dashboard.ngrok.com / kaggle.com/settings.
+No Kaggle API token is needed at runtime — datasets are mounted via **+ Add Input**, not downloaded. Reset any exposed ngrok token immediately at dashboard.ngrok.com.
