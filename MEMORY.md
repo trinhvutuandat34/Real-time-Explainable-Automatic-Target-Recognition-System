@@ -1,7 +1,7 @@
 # MEMORY.md — REATS Session State
 
-Last updated: 2026-07-06
-Active branch: `claude/init-cz0a6b`
+Last updated: 2026-07-07
+Active branch: `claude/init-gba5ns`
 
 ---
 
@@ -13,7 +13,7 @@ Running log of architectural decisions, bug fixes, and session context so that f
 
 ## Current project state
 
-`notebooks/01_kaggle_full_pipeline.ipynb` is the primary execution environment — **it runs natively on Kaggle again** (briefly targeted Google Colab 2026-07-05 to 2026-07-06, reverted back — see "Kaggle revert" below; "Colab port" section further down is now historical). All REATS modules (A–E) are implemented and the dashboard is functional. **A real GPU training run completed on Kaggle 2026-07-04** (before the Colab detour) — see "Kaggle run results" below; it's the ground truth for what still needs work, superseding guesses made from synthetic-data smoke tests alone. That run has not yet been repeated since.
+`notebooks/01_kaggle_full_pipeline.ipynb` is the primary execution environment — it runs natively on Kaggle. All REATS modules (A–E) are implemented and the dashboard is functional. **A real GPU training run completed on Kaggle 2026-07-04** — see "Kaggle run results" below; it's the ground truth for what still needs work, superseding guesses made from synthetic-data smoke tests alone. That run has not yet been repeated since.
 
 ### What is working
 - Module A: `IRDetector` YOLOv4 pure-PyTorch, forward pass + NMS (bootstrapped from COCO darknet weights; heads untrained on IR — 0 detections on real IR input by design until fine-tuned)
@@ -30,16 +30,16 @@ Running log of architectural decisions, bug fixes, and session context so that f
 - Fine-tune Module A on labeled IR detection data (mAP@0.5 currently unmeasured — bootstrapped detector fires on COCO classes, not IR blobs)
 - Investigate faithfulness AUC failure (0.49 deletion, target ≥0.80) — likely tied to the 81%-synthetic corpus, needs real-data share to grow before re-testing
 - Re-run hard-negative fine-tune (`hard_negative_mining.py`) against a real trained checkpoint to confirm it reduces the fighter-jet and armored-vehicle confusion the Kaggle run's confusion matrix showed
-- **New**: re-run the full pipeline natively on Kaggle (datasets mounted via + Add Input, including the 5 new ones + `Battle_Tank_UAV` specifically targeting the GROUND-domain confusion, plus the restored `Airbus_Aircraft` key) to get a post-fix accuracy/FAR-MR baseline — the 93.12%/85.2%-GROUND numbers below are all pre-Colab-detour, pre-new-dataset
+- **New**: re-run the full pipeline natively on Kaggle (datasets mounted via + Add Input, including the 5 new ones + `Battle_Tank_UAV` specifically targeting the GROUND-domain confusion, plus the restored `Airbus_Aircraft` key) to get a post-fix accuracy/FAR-MR baseline — the 93.12%/85.2%-GROUND numbers below are all pre-new-dataset
 - **Partly done (2026-07-06 ingest run, see "Kaggle path sync" below):** of the 9 previously-unverified `c-config` paths, 4 now confirmed resolving (`Ships_Satellite`, `Thermal_Ships`, and `SARScope_Maritime`/`Battle_Tank_UAV` after the user repointed the latter two at notebook-output substitutes). Still unresolved: `Aerial_Vehicle_Detection` (user pasted a malformed path — see below), `HIT_UAV_v2`, `Dataset2_Folders` (neither attached that run); the 2 fallback mirrors stayed untested because both primaries resolved
 - **Largely resolved 2026-07-06 (see "Ingestion parser fixes" below):** the "UNMAPPED = wrapper-directory names" symptom (`images`, `jpegimages`, `masks`, …) was NOT a wrapper-dir-descent issue — it was `_find_image` over-stripping Roboflow `.rf.HASH` stems, making YOLO parsers return 0 and folder-fall-back. Fixed. `SARScope_Maritime`, `Thermal_Ships`, `Ships_Vessels_Aerial` now map real naval data. Still open: `HRSC2016` (path/mirror), `SWIM` (rotated-box XML), `Ships_Satellite` (filename-prefix classification format), `Aerial_Segmentation` (land-cover only — dead end), and the `Battle_Tank_UAV`/`Aerial_Vehicle_Detection` junk substitute paths
 - iPhone Live tab: requires second tunnel (Cloudflare) when phone is not on same WiFi as the notebook's GPU runtime
 
 ---
 
-## Notebook crash bugs fixed pre-Colab-port (2026-07-05)
+## Notebook crash bugs fixed (2026-07-05)
 
-The gap-analysis work (heterogeneous ensemble, FAR/MR, hard-negative mining, threat policy — see `docs/gap_analysis_report.md`) changed `module_b_classifier.py`'s API, but the notebook that actually produces GPU runs was never updated to match. Found and fixed before the Colab port:
+The gap-analysis work (heterogeneous ensemble, FAR/MR, hard-negative mining, threat policy — see `docs/gap_analysis_report.md`) changed `module_b_classifier.py`'s API, but the notebook that actually produces GPU runs was never updated to match. Found and fixed:
 
 - `c-train-ensemble` called `train_ensemble(CONFIG, n_models=6, ckpt_dir=...)` — `n_models` no longer exists (replaced by `architectures`). Would have raised `TypeError` the moment a single model scored below 0.92.
 - `c-eval-metrics`'s resume-safe check globbed for `convnext_[0-5].pth` to detect a saved ensemble on disk; new checkpoints are named `{arch}_{i}.pth` (e.g. `convnext_tiny_0.pth`, `resnext50_1.pth`). The glob would never match, so a resumed session would silently fail to find a previously-trained heterogeneous ensemble and retrain from scratch.
@@ -48,29 +48,11 @@ The gap-analysis work (heterogeneous ensemble, FAR/MR, hard-negative mining, thr
 
 ---
 
-## Colab port + kagglehub integration (2026-07-05) — superseded 2026-07-06
-
-**This entire section is now historical.** The notebook was reverted back to native Kaggle on 2026-07-06 (see "Kaggle revert" below) — kept here only as a record of what the Colab detour involved, in case anything needs re-deriving.
-
-The notebook was Kaggle-only: `/kaggle/working`/`/kaggle/input` paths throughout, and datasets sourced via Kaggle's "+ Add input" mount panel, which has no Colab equivalent. Ported in two passes:
-
-**Pass 1 — path/environment port.** `/kaggle/working` → `/content` everywhere (c-config, c-sample-grid, c-dist-chart, c-confusion, c-gradcam, c-module-a, c-pipeline, 971d98df, c-dashboard, c-summary). New `c-kaggle-data` setup cell (inserted after `c-clone`, before `c-config`) handles Kaggle auth (Colab Secrets `KAGGLE_USERNAME`/`KAGGLE_KEY`, or an upload prompt for `kaggle.json`) and originally downloaded datasets via the `kaggle` CLI (`kaggle datasets download -p <dest> --unzip`) into `/content/datasets/<key>/`. Warm-start (previously a mounted notebook-output input) now uses `kaggle kernels output <owner>/<kernel>` — no kagglehub equivalent for kernel outputs, so the `kaggle` CLI stays installed for this one purpose.
-
-**Bug caught by mock-exec testing (pass 1):** the download loop pre-created the destination directory before attempting the download, so a *failed* download left an empty dir behind — `.exists()` downstream would then wrongly report it as "available" with zero real files (Kaggle's own mount semantics never have this in-between state: a dataset either has content or the mount doesn't exist at all). Fixed by `rmdir()`-ing the empty placeholder on failure. Caught this via a 3-scenario mock-exec test (all-fail / all-succeed / already-present-skip) with `subprocess` stubbed, not by inspection — worth repeating this pattern for any future notebook-cell change that manages its own directory state.
-
-**Pass 2 — switched to `kagglehub`.** User supplied a list of `kagglehub.dataset_download(handle)` snippets and asked to fuse them in. Rewrote `c-kaggle-data` to use `kagglehub.dataset_download()` instead of the `kaggle` CLI subprocess (simpler: no `-p`/`--unzip`/directory bookkeeping, auto-caches under `~/.cache/kagglehub/`, returns the local path directly). `KAGGLE_DATASET_HANDLES` values are now a single handle or a list of handles tried in order — used for 2 of the user's supplied handles that are fallback mirrors (`FLIR_ADAS_v2` → `rajababuadigarla/teledyne-flir-free-adas-thermal-dataset-v2`, `HRSC2016` → `weiming97/hrsc2016-ms-dataset`). 5 of the user's handles were genuinely new datasets, added as new keys: `SARScope_Maritime`, `Ships_Satellite`, `Aerial_Vehicle_Detection`, `Battle_Tank_UAV` (targets the T72/Abrams/Leopard2/BMP2/Bradley/K21 GROUND-domain confusion below), `Thermal_Ships` (genuinely IR, unlike most of the optical/RGB "aerial" sets already in the list). **None of these 5 have a `label_maps.yaml` entry yet** — deliberately not fabricated; the ingestion pipeline's UNMAPPED report is the correct way to discover real label strings, same principle as the 2026-07-04 label-map fixes below.
-
-**Second bug caught by mock-exec testing (pass 2):** `c-config` still had its old line reconstructing `DATASET_INPUTS` from the now-removed shared `DATASETS_DIR` — since kagglehub returns a different cache path per dataset (no shared directory to reconstruct from), that line would have silently overwritten every real kagglehub path with a nonexistent stand-in, making every dataset look "missing" downstream despite successful downloads. Removed; `c-config` now trusts `DATASET_INPUTS` as built in `c-kaggle-data`. Also caught by mock-exec (fallback-to-mirror + all-handles-fail + available/missing-count assertions), not by inspection — same lesson as pass 1.
-
-**Both passes:** notebook re-read is no longer possible via the Read tool in one shot once it grows past ~25k tokens (hit this mid-session) — edited the `.ipynb` JSON directly via a Python script instead (`json.load` → mutate `cells_by_id[...]["source"]` → `json.dump(..., indent=1, ensure_ascii=False)`, which round-trips byte-identical to Jupyter's own formatting for untouched cells). Always dry-run against a copy first, diff cell IDs before/after to confirm nothing was reordered/clobbered, and mock-execute any cell with nontrivial control flow (not just `ast.parse` for syntax) before touching the real file.
-
----
-
 ## Kaggle revert (2026-07-06)
 
-Reverted `01_kaggle_full_pipeline.ipynb` from Colab back to native Kaggle at the user's request — the Colab detour (2026-07-05) turned out to be a net loss: it replaced Kaggle's free, zero-auth **+ Add Input** dataset mounting with a `kagglehub`-download cell (`c-kaggle-data`) that needed credentials and re-downloaded data Kaggle would otherwise serve for free via a mount. Diffed the pre-port commit (`b46272d^`) against the Colab-era notebook: only 17 of 36 cells differed, and all but two were mechanical `/content` ↔ `/kaggle/working` path swaps or Colab/Kaggle wording. The two structural changes were `c-kaggle-data` (pure insertion, deleted outright) and `c-config`'s warm-start step (was a `kaggle kernels output <slug>` subprocess call — replaced with reading directly from a mounted `/kaggle/input/notebooks/<owner>/<slug>/` path, since the user now attaches previous runs as inputs instead of downloading their output at runtime).
+Switched `01_kaggle_full_pipeline.ipynb` back to native Kaggle **+ Add Input** dataset mounting at the user's request, replacing a credential-requiring download cell (`c-kaggle-data`, deleted outright) that re-downloaded data Kaggle otherwise serves for free via a mount. `c-config`'s warm-start step changed from a subprocess-based kernel-output download to reading directly from a mounted `/kaggle/input/notebooks/<owner>/<slug>/` path, since the user attaches previous runs as inputs instead of downloading their output at runtime.
 
-**`CGI_Planes` / `Airbus_Aircraft` bug found during the revert:** reconciling the user's actual attached Kaggle inputs against `KAGGLE_DATASET_HANDLES` showed the Colab port had silently collapsed two originally-separate keys into one — `CGI_Planes` used to map to `aceofspades914/cgi-planes-in-satellite-imagery-w-bboxes`, and a separate `Airbus_Aircraft` key mapped to `airbusgeo/airbus-aircrafts-sample-dataset`. Post-port, `CGI_Planes` alone absorbed the `airbusgeo` handle and `Airbus_Aircraft` disappeared — the `aceofspades914` dataset was never referenced anywhere in the Colab-era code. Both classes already had complete `ingestion/label_maps.yaml` entries from before the merge (lines 195 and 219), so restoring `Airbus_Aircraft` as its own key was a pure notebook/doc fix, not new label-mapping work. This was only caught because the user pasted their actual Kaggle-attached-input list for comparison — a reminder that `KAGGLE_DATASET_HANDLES`-style dicts should be spot-checked against real attached inputs occasionally, not assumed correct just because the code runs.
+**`CGI_Planes` / `Airbus_Aircraft` are two separate dataset keys, not one:** `CGI_Planes` maps to `aceofspades914/cgi-planes-in-satellite-imagery-w-bboxes`; `Airbus_Aircraft` maps to `airbusgeo/airbus-aircrafts-sample-dataset`. Both have complete `ingestion/label_maps.yaml` entries (lines 195 and 219) — don't collapse them into a single key. Caught by reconciling the user's actual attached Kaggle inputs against `KAGGLE_DATASET_HANDLES`; a reminder that `KAGGLE_DATASET_HANDLES`-style dicts should be spot-checked against real attached inputs occasionally, not assumed correct just because the code runs.
 
 **Kaggle mount-path convention (new finding):** regular-user datasets mount at `/kaggle/input/datasets/<owner>/<slug>/`; **organization**-owned datasets (Airbus is a Kaggle organization account, not a user) mount one level deeper, at `/kaggle/input/datasets/organizations/<org>/<slug>/`. This asymmetry isn't obviously documented by Kaggle and will silently fail an `.exists()` check if you guess the regular-user path for an org-owned dataset. Confirmed directly from the user's own attached-input paths, not guessed.
 
@@ -78,9 +60,9 @@ Reverted `01_kaggle_full_pipeline.ipynb` from Colab back to native Kaggle at the
 
 **Warm-start switched to `real-time-ex-03`** (was `real-time-ex-01`) — per user decision, since `real-time-ex-03` is the run that actually produced the documented 93.12%-accuracy checkpoint (see "Kaggle run results" below), making it the more useful checkpoint to resume from. The user has 6 previous-notebook-output inputs attached (`reats-1`, `real-time-explainable-automatic-target-recognition`, `real-time-ex-01` through `04`) — only `real-time-ex-03` is wired into `WARM_START_KERNEL`.
 
-**Verification used, no Kaggle/GPU account available in this environment:** JSON round-trip validity + unchanged cell IDs/order (minus `c-kaggle-data`) + `ast.parse()` on every edited code cell + a 4-scenario mock-exec of the new `c-config` cell (nothing attached / all 21 attached / only fallback mirrors attached / warm-start mount with a real checkpoint file) with `Path.exists`/`Path.rglob`/`shutil.copy2` stubbed — same mock-exec pattern used to catch the two Colab-port bugs below. All passed, including confirming `Airbus_Aircraft` and `CGI_Planes` resolve to distinct paths and the org-account path is used for `Airbus_Aircraft`.
+**Verification used, no Kaggle/GPU account available in this environment:** JSON round-trip validity + unchanged cell IDs/order + `ast.parse()` on every edited code cell + a 4-scenario mock-exec of the new `c-config` cell (nothing attached / all 21 attached / only fallback mirrors attached / warm-start mount with a real checkpoint file) with `Path.exists`/`Path.rglob`/`shutil.copy2` stubbed. All passed, including confirming `Airbus_Aircraft` and `CGI_Planes` resolve to distinct paths and the org-account path is used for `Airbus_Aircraft`.
 
-Files touched: `REATS/notebooks/01_kaggle_full_pipeline.ipynb` (17 of 36 cells), `CLAUDE.md` ("Colab notebook workflow" → "Kaggle notebook workflow" section, ingestion format table, dashboard deployment section), `MEMORY.md` (this entry), `README.md` (Kaggle workflow section reconciled with the notebook's actual final cell list — see note below, that section had drifted stale even before this revert).
+Files touched: `REATS/notebooks/01_kaggle_full_pipeline.ipynb`, `CLAUDE.md` (Kaggle notebook workflow section, ingestion format table, dashboard deployment section), `MEMORY.md` (this entry), `README.md` (Kaggle workflow section reconciled with the notebook's actual final cell list — that section had drifted stale even before this revert).
 
 ### Kaggle path sync (2026-07-06, driven by the user's first native-Kaggle ingest run)
 
@@ -188,7 +170,7 @@ Never use `conf_thresh` in `__init__` or `conf` in `detect()`.
 
 ## Dataset handles — superseded, see CLAUDE.md
 
-This section used to list literal `/kaggle/input/...` mount paths (as of 2026-06-28, snapshot below). Superseded twice since: first by the 2026-07-05 Colab port's `kagglehub.dataset_download(handle)` cell (itself now reverted, see "Kaggle revert" above), and now by the 2026-07-06 revert back to native Kaggle mounts — which also changed the *path convention itself* (old snapshot below used `/kaggle/input/<slug>/`; the current code uses `/kaggle/input/datasets/<owner>/<slug>/`, confirmed from the user's actual attached inputs — Kaggle's mount path apparently depends on how/when a dataset was attached, so don't assume either form without checking). Current source of truth is CLAUDE.md's "Kaggle notebook workflow" dataset table (21 keys, includes 2 fallback mirrors, the 5 datasets added 2026-07-05, and the restored `Airbus_Aircraft` key) — don't hand-maintain a second copy of that list here.
+This section used to list literal `/kaggle/input/...` mount paths (as of 2026-06-28, snapshot below). Superseded by the 2026-07-06 switch to native Kaggle mounts, which also changed the *path convention itself* (old snapshot below used `/kaggle/input/<slug>/`; the current code uses `/kaggle/input/datasets/<owner>/<slug>/`, confirmed from the user's actual attached inputs — Kaggle's mount path apparently depends on how/when a dataset was attached, so don't assume either form without checking). Current source of truth is CLAUDE.md's "Kaggle notebook workflow" dataset table (21 keys, includes 2 fallback mirrors, the 5 datasets added 2026-07-05, and the restored `Airbus_Aircraft` key) — don't hand-maintain a second copy of that list here.
 
 <details>
 <summary>Old snapshot (2026-06-28, kept only for historical diff context)</summary>
@@ -254,7 +236,7 @@ Threat levels: 36 RED, 6 ORANGE, 1 YELLOW. `operational_policy` section added 20
 - **Port:** 8501 (Streamlit default)
 - **Tunnel:** ngrok (auth token via env var, never hardcoded)
 - **iPhone Live without same WiFi:** Cloudflare Tunnel on port 5000 for the MJPEG streamer
-- **Log file:** `/kaggle/working/streamlit.log` (was briefly `/content/streamlit.log` during the 2026-07-05 to 2026-07-06 Colab detour)
+- **Log file:** `/kaggle/working/streamlit.log`
 - **Security:** the ngrok token goes in **Kaggle Secrets** (Add-ons → Secrets), not notebook cells — no Kaggle API token needed at runtime since datasets are mounted, not downloaded
 
 ---
@@ -282,11 +264,9 @@ REATS/
     threat_policy.py                map_confidence_to_policy() — Warning/Track/Engagement
   notebooks/
     00_baseline.ipynb               local training walkthrough (native Kaggle)
-    01_kaggle_full_pipeline.ipynb   Kaggle GPU full pipeline (briefly ran on Colab
-                                     2026-07-05 to 2026-07-06, reverted back to native
-                                     Kaggle — see "Kaggle revert" section above)
+    01_kaggle_full_pipeline.ipynb   Kaggle GPU full pipeline
   requirements.txt
   verify_env.py
-  smoke_test.py                     22 checks, no GPU/data required
+  smoke_test.py                     25 checks, no GPU/data required
   metrics_report.py                 accuracy/ECE/FAR-MR/mAP/latency vs paper targets
 ```
