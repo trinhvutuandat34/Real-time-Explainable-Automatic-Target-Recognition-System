@@ -10,6 +10,8 @@ Replace the existing `CONFIG` dict definition with this version:
 # ── Module B hyperparams ────────────────────────────────────────────────
 # Set FAST_TRAINING = True to train in ~1.5-2h per model instead of ~6h
 # This trades ~1-2% final accuracy for quota compatibility.
+from modules.module_b_classifier import make_fast_config
+
 FAST_TRAINING = False   # <- SET TO True FOR FAST MODE
 
 CONFIG = {
@@ -28,15 +30,15 @@ CONFIG = {
     'grad_clip':        1.0,
     'label_smoothing':  0.1,
     'ema_decay':        0.9999,
-    'enable_fast_train': FAST_TRAINING,
+    'enable_fast_train': False,
 }
 
+# Let make_fast_config apply the full set of fast overrides (epochs, warmup,
+# best_epoch_start AND the critical ema_decay=0.999). Do NOT hand-edit just the
+# epochs — leaving ema_decay at 0.9999 makes the short-schedule EMA (which gets
+# validated and saved) never converge. This one call keeps them consistent.
 if FAST_TRAINING:
-    CONFIG.update({
-        'epochs': 75,
-        'best_epoch_start': 10,
-        'warmup_epochs': 3,
-    })
+    CONFIG = make_fast_config(CONFIG)
 
 available_ds = [k for k, p in DATASET_INPUTS.items() if p.exists()]
 missing_ds   = [k for k in DATASET_INPUTS if k not in available_ds]
@@ -44,7 +46,7 @@ print(f'Available datasets ({len(available_ds)}/{len(DATASET_INPUTS)}): {availab
 if missing_ds:
     print(f'Missing (skipped): {missing_ds}')
 
-mode_str = "FAST (75 epochs, lightweight aug, ~1.5-2h/model)" if FAST_TRAINING else "FULL (300 epochs, ~6h/model)"
+mode_str = "FAST (75 epochs, lightweight aug, ema=0.999, ~1.5-2h/model)" if FAST_TRAINING else "FULL (300 epochs, ~6h/model)"
 print(f'Training mode: {mode_str}')
 print(f'Classes: {NUM_CLASSES} | Batch: {BATCH_SIZE} | Epochs: {CONFIG["epochs"]}')
 ```
