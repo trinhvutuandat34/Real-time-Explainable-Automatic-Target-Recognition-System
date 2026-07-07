@@ -77,9 +77,15 @@ python REATS/generate_flir_fallback.py --flir /path/to/flir_adas/ --out REATS/da
 # Train Module B (ConvNeXt, single model)
 cd REATS && python modules/module_b_classifier.py
 
+# Train Module B fast mode (~1.5-2h instead of 6h; trades ~1-2% accuracy for quota)
+cd REATS && python modules/module_b_classifier.py --fast
+
 # Train the full 6-architecture heterogeneous ensemble (ConvNeXt_tiny, ResNeXt50,
 # ViT_b_16, Swin_T, VGG16, ResNet18 — one model per architecture, not 6 seeds of one)
 cd REATS && python -c "from modules.module_b_classifier import train_ensemble, CONFIG; train_ensemble(CONFIG)"
+
+# Train ensemble in fast mode (~12h instead of 24h; trades ~1-2% accuracy for quota)
+cd REATS && python -c "from modules.module_b_classifier import train_ensemble, make_fast_config, CONFIG; train_ensemble(make_fast_config(CONFIG))"
 
 # Hard-negative mining + fine-tune pass on confusable classes (F16/MiG19/MiG21)
 cd REATS && python modules/hard_negative_mining.py --checkpoint checkpoints/convnext_tiny_0.pth --arch convnext_tiny
@@ -246,7 +252,9 @@ Force-adding `.gitkeep` files requires `git add -f`; ordinary `git add` will ign
 | Faithfulness AUC | ≥ 0.80 |
 | FPS | ≥ 20 |
 
-Single ConvNeXt_tiny achieves ~90.25%; the 6-model softmax ensemble pushes to ~92%. Latency and FPS targets require GPU — CPU numbers are for architecture validation only.
+**Full training (300 epochs):** Single ConvNeXt_tiny achieves ~90.25%; the 6-model softmax ensemble pushes to ~92%. Latency and FPS targets require GPU — CPU numbers are for architecture validation only.
+
+**Fast training mode** (75 epochs, lightweight augmentation): ~1-2% accuracy drop (~90-91% single model, ~90.5% ensemble) but ~4× speedup (~1.5-2h/model, ~12h ensemble instead of 6h/24h). Enable via `CONFIG['enable_fast_train'] = True` in the Kaggle notebook or `--fast` CLI flag for quota-constrained environments. See `FAST_TRAINING_GUIDE.md` for details.
 
 The paper gives no FAR/MR target — these are the professor's additional battlefield-threat-analysis requirement (see `modules/threat_metrics.py`), reported alongside the paper's metrics but not scored against a pass/fail threshold.
 
