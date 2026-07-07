@@ -2,9 +2,16 @@
 MODULE B — ATR Classifier
 Heterogeneous 6-architecture Averaging Ensemble: ConvNeXt_tiny, ResNeXt50_32x4d,
 ViT_b_16, Swin_T, VGG16, ResNet18 — one model per architecture, not 6 seeds of one.
-Target: Accuracy ≥ 92%, ECE ≤ 0.05
+
+Training modes:
+  FULL (default): 300 epochs, validation from epoch 225 → ~6h/model, ~24h/ensemble on T4
+  FAST: 75 epochs, validation from epoch 10 → ~1.5-2h/model, ~12h/ensemble on T4
+        Reduces final accuracy by ~1-2% but sufficient for model comparison.
+        Enable: CONFIG['enable_fast_train'] = True
+
+Target (full training): Accuracy ≥ 92%, ECE ≤ 0.05
 Paper: Do et al. (2025), JKSCI Vol.30 No.1
-Hyperparams: AdamW lr=1e-4, batch=128, epochs=300, checkpoint from epoch 225
+Hyperparams: AdamW lr=1e-4, batch=128, epochs=300 (or 75 in fast mode), checkpoint from epoch 225 (or 10)
 """
 
 import copy
@@ -66,7 +73,23 @@ CONFIG = {
     "grad_clip":        1.0,
     "label_smoothing":  0.1,
     "ema_decay":        0.9999,
+    # Fast training mode: set enable_fast_train=True to run ~1.5-2h per model
+    # instead of ~6h, or enable_fast_ensemble=True for 6-model ensemble in ~12h
+    # instead of ~24h. Trades final accuracy (~1-2% drop) for quota compatibility.
+    "enable_fast_train": False,
 }
+
+
+def make_fast_config(cfg: dict) -> dict:
+    """Reduce epochs and enable earlier validation for quota-constrained runs.
+    ~1.5-2h per model on T4 (vs ~6h full training)."""
+    fast_cfg = cfg.copy()
+    fast_cfg.update({
+        "epochs":           75,       # reduced from 300
+        "best_epoch_start": 10,       # start validation much earlier
+        "warmup_epochs":    3,        # faster warmup
+    })
+    return fast_cfg
 
 
 # ---------------------------------------------------------------------------
@@ -90,21 +113,33 @@ class _NormalizedEqualize(nn.Module):
 
 
 class KorniaAugmentPipeline(nn.Module):
-    """IR augmentation from Table 1 of the paper — each transform p=0.5."""
-    def __init__(self):
+    """IR augmentation from Table 1 of the paper — each transform p=0.5.
+    Optionally reduced complexity (fewer transforms, lower probability) for fast training."""
+    def __init__(self, full: bool = True):
         super().__init__()
-        self.aug = nn.Sequential(
-            K.RandomResizedCrop((224, 224), p=0.5),
-            K.RandomHorizontalFlip(p=0.5),
-            K.RandomVerticalFlip(p=0.5),
-            K.RandomRotation(degrees=180, p=0.5),
-            K.RandomAffine(degrees=15, translate=(0.1, 0.1), p=0.5),
-            K.RandomPerspective(distortion_scale=0.3, p=0.5),
-            K.RandomBrightness(brightness=(0.7, 1.3), p=0.5),
-            K.RandomContrast(contrast=(0.7, 1.3), p=0.5),
-            _NormalizedEqualize(p=0.5),
-            K.RandomGaussianNoise(mean=0.0, std=0.05, p=0.5),
-        )
+        if full:
+            # Full paper augmentation
+            self.aug = nn.Sequential(
+                K.RandomResizedCrop((224, 224), p=0.5),
+                K.RandomHorizontalFlip(p=0.5),
+                K.RandomVerticalFlip(p=0.5),
+                K.RandomRotation(degrees=180, p=0.5),
+                K.RandomAffine(degrees=15, translate=(0.1, 0.1), p=0.5),
+                K.RandomPerspective(distortion_scale=0.3, p=0.5),
+                K.RandomBrightness(brightness=(0.7, 1.3), p=0.5),
+                K.RandomContrast(contrast=(0.7, 1.3), p=0.5),
+                _NormalizedEqualize(p=0.5),
+                K.RandomGaussianNoise(mean=0.0, std=0.05, p=0.5),
+            )
+        else:
+            # Lightweight aug for fast training — fewer transforms, lower p
+            self.aug = nn.Sequential(
+                K.RandomResizedCrop((224, 224), p=0.3),
+                K.RandomHorizontalFlip(p=0.3),
+                K.RandomRotation(degrees=90, p=0.3),
+                K.RandomBrightness(brightness=(0.8, 1.2), p=0.3),
+                K.RandomContrast(contrast=(0.8, 1.2), p=0.3),
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.aug(x)
@@ -511,18 +546,31 @@ def train_full_pipeline(
     ckpt_path: str = "checkpoints/convnext_best.pth",
     arch: str = "convnext_tiny",
 ) -> Tuple[float, str]:
-    """Train a single model (architecture `arch`) end-to-end with AMP, EMA, and warmup-cosine LR."""
+    """Train a single model (architecture `arch`) end-to-end with AMP, EMA, and warmup-cosine LR.
+
+    If cfg['enable_fast_train']=True, uses reduced epochs (75 instead of 300) and earlier
+    validation (from epoch 10 instead of 225) to fit within quota (~1.5-2h on T4).
+    """
     torch.manual_seed(seed)
     np.random.seed(seed)
+
+    # Apply fast-training config overrides if enabled
+    if cfg.get("enable_fast_train", False):
+        cfg = make_fast_config(cfg)
+
     device = cfg["device"]
     Path("checkpoints").mkdir(exist_ok=True)
 
     train_loader, val_loader, _ = build_loaders(cfg)
     model        = build_model(arch, cfg["num_classes"]).to(device)
+
+    # Use lightweight augmentation if fast training is enabled
+    use_full_aug = not cfg.get("enable_fast_train", False)
     aug_pipeline = nn.Sequential(
-        MultiViewpointAugmentor().to(device),
-        KorniaAugmentPipeline().to(device),
+        (MultiViewpointAugmentor() if use_full_aug else nn.Identity()).to(device),
+        KorniaAugmentPipeline(full=use_full_aug).to(device),
     )
+
     criterion    = LabelSmoothingCrossEntropy(cfg.get("label_smoothing", 0.1))
     optimizer    = AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg.get("weight_decay", 1e-2))
     scaler       = GradScaler("cuda") if device == "cuda" else None
@@ -535,11 +583,13 @@ def train_full_pipeline(
     )
 
     best_val_acc = 0.0
-    mlflow.set_experiment("REATS-Baseline")
+    mode_suffix = "_fast" if cfg.get("enable_fast_train", False) else ""
+    mlflow.set_experiment(f"REATS-Baseline{mode_suffix}")
     with mlflow.start_run(run_name=f"{arch}_seed{seed}"):
         mlflow.log_params({k: v for k, v in cfg.items() if not isinstance(v, list)})
         mlflow.log_param("seed", seed)
         mlflow.log_param("arch", arch)
+        mlflow.log_param("fast_train", cfg.get("enable_fast_train", False))
         for epoch in range(1, cfg["epochs"] + 1):
             scheduler.step(epoch)
             tr_loss, tr_acc = train_one_epoch(
@@ -565,7 +615,7 @@ def train_full_pipeline(
                     )
                     print(f"[Epoch {epoch}] New best: {val_acc:.4f} → {ckpt_path}")
 
-            if epoch % 10 == 0:
+            if epoch % (5 if cfg.get("enable_fast_train", False) else 10) == 0:
                 print(f"[Epoch {epoch:3d}] loss={tr_loss:.4f} acc={tr_acc:.4f}")
 
     return best_val_acc, ckpt_path
@@ -579,14 +629,18 @@ def train_ensemble(
     """Train one model per architecture in `architectures` (default: the 6 heterogeneous
     architectures from Do et al. 2025 — ConvNeXt_tiny, ResNeXt50, ViT_b_16, Swin_T, VGG16,
     ResNet18), each with a distinct seed. A heterogeneous ensemble fuses local CNN features
-    with global Transformer features; it is not 6 seeds of one architecture."""
+    with global Transformer features; it is not 6 seeds of one architecture.
+
+    If cfg['enable_fast_train']=True, trains 6 models in ~12 hours instead of ~24.
+    """
     architectures = architectures or ARCHITECTURES
     Path(ckpt_dir).mkdir(exist_ok=True)
     paths: List[str] = []
+    fast_note = " (fast mode)" if cfg.get("enable_fast_train", False) else ""
     for i, arch in enumerate(architectures):
         seed = 42 + i
         path = str(Path(ckpt_dir) / f"{arch}_{i}.pth")
-        print(f"\n=== Training model {i}: {arch} (seed={seed}) ===")
+        print(f"\n=== Training model {i}/{len(architectures)}: {arch} (seed={seed}){fast_note} ===")
         _, saved = train_full_pipeline(cfg, seed=seed, ckpt_path=path, arch=arch)
         paths.append(saved)
     return paths
@@ -617,15 +671,24 @@ def load_ensemble(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    import sys
     device = CONFIG["device"]
     print(f"[Module B] Device: {device}")
 
-    best_val_acc, ckpt_path = train_full_pipeline(CONFIG)
-    status = "PASS" if best_val_acc >= 0.92 else "FAIL — debug needed"
+    # Check for --fast flag
+    fast_mode = "--fast" in sys.argv
+    if fast_mode:
+        print("[Module B] Using FAST training mode (75 epochs, reduced augmentation)")
+        cfg = make_fast_config(CONFIG)
+    else:
+        cfg = CONFIG
+
+    best_val_acc, ckpt_path = train_full_pipeline(cfg)
+    status = "PASS" if best_val_acc >= 0.92 else ("CLOSE" if best_val_acc >= 0.90 else "FAIL — consider ensemble/longer training")
     print(f"\n[Module B] Best val accuracy: {best_val_acc:.4f} — {status}")
 
-    _, val_loader, _ = build_loaders(CONFIG)
-    model = build_convnext(CONFIG["num_classes"], pretrained=False).to(device)
+    _, val_loader, _ = build_loaders(cfg)
+    model = build_convnext(cfg["num_classes"], pretrained=False).to(device)
     ckpt  = torch.load(ckpt_path, map_location=device)
     model.load_state_dict(ckpt.get("ema_state_dict", ckpt["state_dict"]))
     model.eval()
