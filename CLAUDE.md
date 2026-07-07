@@ -269,7 +269,7 @@ Two services share one image (`Dockerfile` builds from `REATS/requirements.txt` 
 
 ## Kaggle notebook workflow (`notebooks/01_kaggle_full_pipeline.ipynb`)
 
-Runs natively as a Kaggle Notebook — `/kaggle/working` for writable output, `/kaggle/input` for read-only mounted datasets. (It briefly targeted Google Colab instead, 2026-07-05 to 2026-07-06, via a `kagglehub`-download cell standing in for Kaggle's own mount panel; reverted back to native Kaggle since Colab has no equivalent of Kaggle's **+ Add Input** panel and the download step just duplicated data Kaggle already serves for free via a mount.)
+Runs natively as a Kaggle Notebook — `/kaggle/working` for writable output, `/kaggle/input` for read-only mounted datasets.
 
 The repo root also has `real-time-ex-03.ipynb` — an **executed** ~6MB export of the 2026-07-04 GPU run (22 code cells with saved outputs, `papermill` metadata), kept only as the provenance record for the 93.12%-accuracy result in `MEMORY.md`'s "Kaggle run results". It is a point-in-time snapshot, not the development notebook, and has already diverged (31 cells vs. this one's current 35) — always edit `REATS/notebooks/01_kaggle_full_pipeline.ipynb`, never the root file.
 
@@ -303,8 +303,6 @@ Run cells in order: `c-gpu` → `c-install` → `c-clone` → `c-config` → `c-
 | `Aerial_Segmentation` | `humansintheloop/semantic-segmentation-of-aerial-imagery` | mixed |
 | `Aerial_Roof_Seg` | `atilol/aerialimageryforroofsegmentation` | (null labels — contributes 0 annotations) |
 | notebook output `trnhvtunt/real-time-ex-03` | warm-start checkpoints | — |
-
-**`CGI_Planes` / `Airbus_Aircraft` split (found 2026-07-06):** the Colab port had collapsed these into a single `CGI_Planes` key pointing at the `airbusgeo` handle, silently dropping the original `aceofspades914` CGI_Planes dataset. Both already had complete `ingestion/label_maps.yaml` entries from before the merge, so restoring the second key was a pure notebook/doc fix — no new label-mapping work needed.
 
 **The 5 new keys have no `ingestion/label_maps.yaml` entry yet** — inventing one without inspecting each dataset's actual raw label strings would risk silently mis-mapping classes (exactly the failure mode `_resolve_label`'s **UNMAPPED** report exists to catch). Run `c-ingest`, read its UNMAPPED report, and add real entries from there.
 
