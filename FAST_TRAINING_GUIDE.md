@@ -188,7 +188,7 @@ Alternatively: Train from scratch with `epochs=125` (75+50) and load the weights
 
 Options (trades more accuracy):
 1. **Reduce batch size:** `batch_size=64` instead of 128 (but slows training slightly — no win)
-2. **Skip validation:** Set `best_epoch_start=75` to skip checkpointing entirely (~5% speedup, but no model output)
+2. **Skip validation:** Set `best_epoch_start=76` (above `epochs=75`) to skip validation/checkpointing entirely (~5% speedup, but no saved model — you'd re-run to get output). Note `best_epoch_start=75` still validates and checkpoints once, on the final epoch.
 3. **Single architecture only:** Train just ConvNeXt_tiny (already 6× faster than ensemble)
 4. **Reduce dataset size:** Use `--train 50` (50 images per class) instead of 170 in ingestion pipeline
 
