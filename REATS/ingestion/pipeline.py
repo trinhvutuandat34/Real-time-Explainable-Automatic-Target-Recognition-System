@@ -691,6 +691,15 @@ class IngestPipeline:
         be systematically wrong wherever the target doesn't fill the frame,
         so those are skipped here rather than turned into bad boxes.
 
+        Resume-safe like run(): an image already written by a prior call
+        (same deterministic stem, regardless of which split it landed in) is
+        left untouched rather than reshuffled. self.rng is stateful and
+        shared with run(), so a second call — e.g. after attaching a new
+        Kaggle dataset mid-session and re-running ingestion — would otherwise
+        draw a different shuffle and could reassign an already-written image
+        to a different split, leaking the same physical image across
+        train/val/test since nothing would remove the old copy.
+
         Returns {split: {"images": n, "boxes": n}}.
         """
         assert abs(sum(split_ratios) - 1.0) < 1e-6, "split_ratios must sum to 1.0"
@@ -710,20 +719,34 @@ class IngestPipeline:
                 key = (ann["_dataset"], str(ann["image_path"]), ann.get("_frame_idx"))
                 groups[key].append(ann)
 
-        image_keys = list(groups.keys())
-        self.rng.shuffle(image_keys)
+        def _stem_for(key: tuple) -> str:
+            ds_key, image_path, frame_idx = key
+            stem_src = Path(image_path).stem
+            stem = f"{ds_key}__{stem_src}" + (f"__f{frame_idx:04d}" if frame_idx is not None else "")
+            return "".join(c if (c.isalnum() or c in "_-") else "_" for c in stem)[:180]
 
-        n       = len(image_keys)
+        existing_stems: set[str] = set()
+        for split in splits:
+            img_dir = self.out_root / split / "images"
+            if img_dir.exists():
+                existing_stems.update(p.stem for p in img_dir.iterdir() if p.is_file())
+
+        new_keys = [k for k in groups if _stem_for(k) not in existing_stems]
+        resumed  = len(groups) - len(new_keys)
+
+        self.rng.shuffle(new_keys)
+        n       = len(new_keys)
         n_train = int(n * split_ratios[0])
         n_val   = int(n * split_ratios[1])
         split_of: dict[tuple, str] = {}
-        for i, key in enumerate(image_keys):
+        for i, key in enumerate(new_keys):
             split_of[key] = "train" if i < n_train else ("val" if i < n_train + n_val else "test")
 
         W = 66
         print(f"\n{'='*W}")
         print("  REATS Detection-Format Ingestion (YOLO images/ + labels/)")
-        print(f"  Unique images : {n}  (skipped {skipped_no_bbox} bbox-less annotation(s))")
+        print(f"  Unique images : {len(groups)}  new={n}  "
+              f"already-ingested={resumed}  (skipped {skipped_no_bbox} bbox-less annotation(s))")
         print(f"  Split ratios  : train={split_ratios[0]:.0%} "
               f"val={split_ratios[1]:.0%} test={split_ratios[2]:.0%}")
         if dry_run:
@@ -733,7 +756,8 @@ class IngestPipeline:
         written = {s: {"images": 0, "boxes": 0} for s in splits}
         decode_failed = 0
 
-        for key, anns in groups.items():
+        for key in new_keys:
+            anns = groups[key]
             split = split_of[key]
             ds_key, image_path, frame_idx = key
             is_thermal = anns[0]["_thermal"]
@@ -765,9 +789,7 @@ class IngestPipeline:
             if not boxes:
                 continue
 
-            stem_src = Path(image_path).stem
-            stem = f"{ds_key}__{stem_src}" + (f"__f{frame_idx:04d}" if frame_idx is not None else "")
-            stem = "".join(c if (c.isalnum() or c in "_-") else "_" for c in stem)[:180]
+            stem = _stem_for(key)
 
             if not dry_run:
                 save_frame(gray, self.out_root / split / "images" / f"{stem}.jpg")
