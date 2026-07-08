@@ -81,6 +81,10 @@ def load_pipeline(det_weights: str, cls_weights_csv: str):
             or ckpt
         ) if isinstance(ckpt, dict) else ckpt
         m.load_state_dict(state)
+        # Match the detector's device — otherwise the classifier silently
+        # stays on CPU even when a GPU is available (the dominant cost in
+        # end-to-end latency), since nothing else in this module moves it.
+        m.to(detector.device)
         m.eval()
         total_cls_params += sum(p.numel() for p in m.parameters())
         models.append(m)
@@ -129,6 +133,17 @@ def _batch_size_for(model) -> int:
         return 4
 
 
+def _classifier_device(model) -> torch.device:
+    """Device the classifier's parameters actually live on. load_pipeline()
+    moves the classifier onto the detector's device (cuda if available), so
+    input tensors built on CPU (torchvision transforms, preprocess_roi's
+    default) must be moved here before being passed to the classifier."""
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
 def run_pipeline(
     frame: np.ndarray,
     detector,
@@ -153,6 +168,7 @@ def run_pipeline(
     # cores and big batches regress (measured: batch 4 ≈ 49 ms/img vs batch 32
     # ≈ 75 ms/img); on GPU larger batches amortise kernel launches.
     CHUNK = _batch_size_for(classifier)
+    cls_device = _classifier_device(classifier)
     pend_rois: list = []
     pend_tensors: list = []
     pend_dets: list = []
@@ -189,7 +205,7 @@ def run_pipeline(
                 mc_probs = []
                 for _ in range(mc_passes):
                     with torch.no_grad():
-                        mc_probs.append(classifier(tensor)[0].numpy())
+                        mc_probs.append(classifier(tensor)[0].cpu().numpy())
                 classifier.eval()
                 mc_arr    = np.stack(mc_probs)               # (passes, C)
                 mean_p    = mc_arr.mean(axis=0)
@@ -214,7 +230,7 @@ def run_pipeline(
             continue
         roi_bgr = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR) if roi.ndim == 2 else roi
         pend_rois.append(roi_bgr)
-        pend_tensors.append(tf(roi_bgr))
+        pend_tensors.append(tf(roi_bgr).to(cls_device))
         pend_dets.append(det)
         if len(pend_tensors) >= CHUNK:
             _classify_pending()
@@ -307,7 +323,7 @@ def _grad_cam_batch(
                 heatmaps = []
                 for i, out_shape in enumerate(out_shapes):
                     weights = grads[i].mean(dim=(1, 2), keepdim=True)
-                    cam = (weights * acts_d[i]).sum(dim=0).numpy()
+                    cam = (weights * acts_d[i]).sum(dim=0).cpu().numpy()
                     cam = np.maximum(cam, 0)
                     if cam.max() > 0:
                         cam = cam / cam.max()
@@ -384,7 +400,7 @@ def _eigen_cam(
         if not acts:
             return None
 
-        feat = acts[0].squeeze(0).numpy()        # (C, H, W)
+        feat = acts[0].squeeze(0).cpu().numpy()   # (C, H, W)
         C, H, W = feat.shape
         flat = feat.reshape(C, -1).T             # (H*W, C)
 
@@ -774,6 +790,7 @@ def _tab_calibration():
 
         tf = _get_transform()
         BATCH = _batch_size_for(classifier)
+        cls_device = _classifier_device(classifier)
         pending_tensors: list = []
         pending_true: list = []
 
@@ -815,7 +832,7 @@ def _tab_calibration():
             if frame is None:
                 continue
 
-            pending_tensors.append(tf(frame))
+            pending_tensors.append(tf(frame).to(cls_device))
             pending_true.append(CLASSES.index(label_name))
             if len(pending_tensors) >= BATCH:
                 _flush()
@@ -1129,7 +1146,7 @@ def _tab_live_feed(conf_thresh: float, iou_thresh: float, hm_opacity: float) -> 
             # the Warning/Track/Engagement thresholds)
             tensor = None
             try:
-                tensor = preprocess_roi(roi)
+                tensor = preprocess_roi(roi, device=str(_classifier_device(classifier)))
                 with torch.no_grad():
                     probs = classifier(tensor).squeeze(0).cpu().numpy()
                 top_idx   = int(probs.argmax())
