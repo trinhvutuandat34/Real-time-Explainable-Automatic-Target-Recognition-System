@@ -440,7 +440,16 @@ def _render_sidebar():
     """Render sidebar; returns (det_weights, cls_weights_csv, thresholds, flags)."""
     with st.sidebar:
         st.header("⚙️ Model Configuration")
-        det_weights  = st.text_input("Detector weights path", "checkpoints/detector_bootstrap.pt")
+        # Prefer a trained detector over the COCO-bootstrap-only checkpoint
+        # once one exists (checkpoints/detector_trained.pt, written by the
+        # notebook's c-train-detector cell) — otherwise every fresh page
+        # load silently falls back to the untrained-heads checkpoint again.
+        _default_det_weights = (
+            "checkpoints/detector_trained.pt"
+            if Path("checkpoints/detector_trained.pt").exists()
+            else "checkpoints/detector_bootstrap.pt"
+        )
+        det_weights  = st.text_input("Detector weights path", _default_det_weights)
         cls_weights  = st.text_input(
             "Classifier weights (comma-separated)",
             "checkpoints/convnext_best.pth",
