@@ -67,7 +67,16 @@ python modules/module_b_classifier.py --fast
 | `epochs` | 300 | 75 | **4× speedup** |
 | `best_epoch_start` | 225 | 10 | Catches good models 21× faster |
 | `warmup_epochs` | 10 | 3 | Less overhead |
+| `ema_decay` | 0.9999 | 0.999 | **Required** — see note below |
 | Augmentation | Full MultiViewpoint + Kornia | Lightweight Kornia only | Modest regularization trade |
+
+> **Why `ema_decay` must drop in fast mode.** Validation and checkpointing run on the
+> EMA weights (the dashboard also loads `ema_state_dict` first). The EMA time constant is
+> `1/(1-decay)` steps: `0.9999` = 10 000 steps. A 75-epoch run is only ~4 300 steps, so at
+> `0.9999` the EMA never converges — it stays ~65% initialization weights, making the saved
+> checkpoint near-random. `0.999` (1 000-step constant) converges to ~1.4% initialization by
+> the end of the short schedule. `make_fast_config()` sets this automatically; do not leave it
+> at `0.9999` when cutting epochs.
 
 ### Augmentation Details
 
@@ -187,13 +196,19 @@ Options (trades more accuracy):
 
 **`module_b_classifier.py`:**
 - Added `enable_fast_train` flag to `CONFIG`
-- Added `make_fast_config()` function (returns 75-epoch, lightweight-aug config)
-- Updated `KorniaAugmentPipeline` to accept `full=True/False` parameter
-- Modified `train_full_pipeline()` to detect and apply fast config automatically
-- Updated `train_ensemble()` to show fast-mode indicator in logs
-- Modified `main()` to accept `--fast` CLI flag
+- Added `make_fast_config()` — returns a 75-epoch, lightweight-aug config; also sets
+  `enable_fast_train=True` (so every entry point takes one path) and drops `ema_decay` to
+  0.999 (so the EMA converges inside the short schedule — see the note above). Idempotent.
+- Updated `KorniaAugmentPipeline` to accept a `full=True/False` parameter
+- Modified `train_full_pipeline()` to apply the fast config automatically and enable
+  `cudnn.benchmark` on CUDA (auto-tunes conv kernels for the fixed 224×224 input)
+- Added `persistent_workers` to `build_loaders()` (workers survive across epochs)
+- Updated `train_ensemble()` to show a fast-mode indicator in logs
+- Modified `main()` to accept a `--fast` CLI flag (routes through the same fast path as the notebook)
 
-**Backward compatibility:** Default behavior unchanged. Existing notebooks and scripts work as-is.
+**Backward compatibility:** Default behavior unchanged — `cudnn.benchmark` and
+`persistent_workers` speed up full training too, at no accuracy cost. Existing notebooks and
+scripts work as-is.
 
 ## References
 

@@ -73,21 +73,30 @@ CONFIG = {
     "grad_clip":        1.0,
     "label_smoothing":  0.1,
     "ema_decay":        0.9999,
-    # Fast training mode: set enable_fast_train=True to run ~1.5-2h per model
-    # instead of ~6h, or enable_fast_ensemble=True for 6-model ensemble in ~12h
-    # instead of ~24h. Trades final accuracy (~1-2% drop) for quota compatibility.
+    # Fast training mode: set enable_fast_train=True (or pass the config through
+    # make_fast_config) to run ~1.5-2h per model instead of ~6h — ~12h for the
+    # 6-model ensemble instead of ~24h. Trades ~1-2% accuracy for quota compatibility.
     "enable_fast_train": False,
 }
 
 
 def make_fast_config(cfg: dict) -> dict:
-    """Reduce epochs and enable earlier validation for quota-constrained runs.
-    ~1.5-2h per model on T4 (vs ~6h full training)."""
+    """Return a copy of `cfg` tuned for a short, quota-friendly run (~1.5-2h/model on T4
+    vs ~6h full training). Idempotent — safe to apply more than once.
+
+    Besides cutting epochs, this drops `ema_decay` from 0.9999 to 0.999. That matters:
+    the EMA time constant is 1/(1-decay) steps, so 0.9999 (10000 steps) never converges
+    inside a 75-epoch (~4300-step) schedule — the EMA weights that get validated *and*
+    saved (dashboard loads `ema_state_dict` first) would stay ~65% initialization. 0.999
+    (1000-step constant) converges well within the short schedule.
+    """
     fast_cfg = cfg.copy()
     fast_cfg.update({
-        "epochs":           75,       # reduced from 300
-        "best_epoch_start": 10,       # start validation much earlier
-        "warmup_epochs":    3,        # faster warmup
+        "enable_fast_train": True,    # so train_full_pipeline picks the fast aug path too
+        "epochs":            75,      # reduced from 300
+        "best_epoch_start":  10,      # start validation/checkpointing much earlier
+        "warmup_epochs":     3,       # faster warmup
+        "ema_decay":         0.999,   # converges within the short schedule (see docstring)
     })
     return fast_cfg
 
@@ -263,8 +272,12 @@ def build_loaders(cfg: dict = CONFIG) -> Tuple[DataLoader, DataLoader, DataLoade
     root = Path(cfg["data_root"])
     # pin_memory only helps host→CUDA copies; on CPU-only ("base" Kaggle) it is
     # a no-op that just prints a warning, so gate it on CUDA availability.
-    kw   = dict(batch_size=cfg["batch_size"], num_workers=4,
-                pin_memory=torch.cuda.is_available())
+    # persistent_workers keeps the 4 workers alive across epochs instead of
+    # respawning them each epoch — noticeable with the short epochs of fast mode.
+    num_workers = 4
+    kw   = dict(batch_size=cfg["batch_size"], num_workers=num_workers,
+                pin_memory=torch.cuda.is_available(),
+                persistent_workers=num_workers > 0)
     return (
         DataLoader(datasets.ImageFolder(root / "train", transform=base_tf), shuffle=True,  **kw),
         DataLoader(datasets.ImageFolder(root / "val",   transform=base_tf), shuffle=False, **kw),
@@ -554,11 +567,16 @@ def train_full_pipeline(
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    # Apply fast-training config overrides if enabled
+    # Apply fast-training config overrides if enabled (idempotent)
     if cfg.get("enable_fast_train", False):
         cfg = make_fast_config(cfg)
 
     device = cfg["device"]
+    # Inputs are a fixed 224×224 shape, so let cuDNN auto-tune the fastest conv
+    # algorithms once and reuse them — a meaningful speedup on the CNN-heavy
+    # architectures (ConvNeXt/ResNeXt/VGG/ResNet), free of any accuracy cost.
+    if device == "cuda":
+        torch.backends.cudnn.benchmark = True
     Path("checkpoints").mkdir(exist_ok=True)
 
     train_loader, val_loader, _ = build_loaders(cfg)
@@ -675,13 +693,13 @@ def main() -> None:
     device = CONFIG["device"]
     print(f"[Module B] Device: {device}")
 
-    # Check for --fast flag
+    # Check for --fast flag. Just flip the flag on; train_full_pipeline applies
+    # make_fast_config internally, so the CLI and the notebook (which sets
+    # CONFIG['enable_fast_train']=True) take the exact same code path.
     fast_mode = "--fast" in sys.argv
     if fast_mode:
         print("[Module B] Using FAST training mode (75 epochs, reduced augmentation)")
-        cfg = make_fast_config(CONFIG)
-    else:
-        cfg = CONFIG
+    cfg = {**CONFIG, "enable_fast_train": True} if fast_mode else CONFIG
 
     best_val_acc, ckpt_path = train_full_pipeline(cfg)
     status = "PASS" if best_val_acc >= 0.92 else ("CLOSE" if best_val_acc >= 0.90 else "FAIL — consider ensemble/longer training")
