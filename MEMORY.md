@@ -1,6 +1,6 @@
 # MEMORY.md — REATS Session State
 
-Last updated: 2026-07-07
+Last updated: 2026-07-08
 Active branch: `claude/init-gba5ns`
 
 ---
@@ -17,7 +17,7 @@ Running log of architectural decisions, bug fixes, and session context so that f
 
 ### What is working
 - Module A: `IRDetector` YOLOv4 pure-PyTorch, forward pass + NMS (bootstrapped from COCO darknet weights; heads untrained on IR — 0 detections on real IR input by design until fine-tuned)
-- Module B: heterogeneous 6-architecture ensemble (ConvNeXt_tiny/ResNeXt50/ViT_b_16/Swin_T/VGG16/ResNet18), AMP + EMA, TemperatureScaler calibration, hard-negative mining (3 confusable groups)
+- Module B: heterogeneous 6-architecture ensemble (ConvNeXt_tiny/ResNeXt50/ViT_b_16/Swin_T/VGG16/ResNet18), AMP + EMA, TemperatureScaler calibration, hard-negative mining (3 confusable groups); optional fast-training mode (`CONFIG['enable_fast_train']` / `--fast` / `make_fast_config()`, 75 epochs instead of 300, ~1.5-2h/model vs ~6h) for quota-constrained runs — see `FAST_TRAINING_GUIDE.md`
 - Module C: GradCAM / GradCAM++ / EigenCAM, SHAP, LIME, MCDropout, faithfulness AUC — Grad-CAM batched per-chunk in Module D
 - Module D: Streamlit 5-tab dashboard (Live Analysis, Batch, Calibration, About, iPhone Live) — FAR/MR + Warning/Track/Engagement policy wired in; ROI classification batched device-aware (see below)
 - Module E: FastAPI/WebSocket phone-camera streamer
@@ -28,12 +28,85 @@ Running log of architectural decisions, bug fixes, and session context so that f
 - Fix the 7 zero-mapped-label datasets flagged by the 2026-07-04 run (partially addressed; HRSC2016 may need dataset-content verification, not just a code fix)
 - **New**: add `ingestion/label_maps.yaml` entries for the 5 datasets added 2026-07-05 (`Ships_Satellite`, `SARScope_Maritime`, `Thermal_Ships`, `Aerial_Vehicle_Detection`, `Battle_Tank_UAV`) — none have a mapping yet; inspect via the ingestion pipeline's own UNMAPPED report first, don't guess
 - Fine-tune Module A on labeled IR detection data (mAP@0.5 currently unmeasured — bootstrapped detector fires on COCO classes, not IR blobs)
+- **New (2026-07-08):** actually train the 6 heterogeneous architectures to convergence on GPU — the code (`ARCHITECTURES`, `build_model`, `train_ensemble`) is complete and unit-tested, but the one real GPU run to date (2026-07-04) only trained a single ConvNeXt_tiny, which already cleared 92% (93.12%), so the notebook's `TRAIN_ENSEMBLE = best_val_acc < 0.92` auto-skip never triggered the ensemble path. No heterogeneous-ensemble accuracy number exists yet to compare against the paper's reported 0.92.
+- **New (2026-07-08):** tune `operational_policy` confidence thresholds (0.50/0.75/0.90 in `targets.yaml`) against real measured FAR/MR data — current values are a reasonable starting point, not empirically fit to any trained model's actual confidence distribution.
+- **New (2026-07-08):** `docs/gap_analysis_report.md`'s Gap 3 write-up is stale — it still describes `CONFUSABLE_GROUPS` as a single group (`{F16, MiG19, MiG21}`), but the code has had 3 groups since the 2026-07-04 run (see "Kaggle run results" below). Flagged to user, not yet edited.
 - Investigate faithfulness AUC failure (0.49 deletion, target ≥0.80) — likely tied to the 81%-synthetic corpus, needs real-data share to grow before re-testing
 - Re-run hard-negative fine-tune (`hard_negative_mining.py`) against a real trained checkpoint to confirm it reduces the fighter-jet and armored-vehicle confusion the Kaggle run's confusion matrix showed
 - **New**: re-run the full pipeline natively on Kaggle (datasets mounted via + Add Input, including the 5 new ones + `Battle_Tank_UAV` specifically targeting the GROUND-domain confusion, plus the restored `Airbus_Aircraft` key) to get a post-fix accuracy/FAR-MR baseline — the 93.12%/85.2%-GROUND numbers below are all pre-new-dataset
 - **Partly done (2026-07-06 ingest run, see "Kaggle path sync" below):** of the 9 previously-unverified `c-config` paths, 4 now confirmed resolving (`Ships_Satellite`, `Thermal_Ships`, and `SARScope_Maritime`/`Battle_Tank_UAV` after the user repointed the latter two at notebook-output substitutes). Still unresolved: `Aerial_Vehicle_Detection` (user pasted a malformed path — see below), `HIT_UAV_v2`, `Dataset2_Folders` (neither attached that run); the 2 fallback mirrors stayed untested because both primaries resolved
 - **Largely resolved 2026-07-06 (see "Ingestion parser fixes" below):** the "UNMAPPED = wrapper-directory names" symptom (`images`, `jpegimages`, `masks`, …) was NOT a wrapper-dir-descent issue — it was `_find_image` over-stripping Roboflow `.rf.HASH` stems, making YOLO parsers return 0 and folder-fall-back. Fixed. `SARScope_Maritime`, `Thermal_Ships`, `Ships_Vessels_Aerial` now map real naval data. Still open: `HRSC2016` (path/mirror), `SWIM` (rotated-box XML), `Ships_Satellite` (filename-prefix classification format), `Aerial_Segmentation` (land-cover only — dead end), and the `Battle_Tank_UAV`/`Aerial_Vehicle_Detection` junk substitute paths
 - iPhone Live tab: requires second tunnel (Cloudflare) when phone is not on same WiFi as the notebook's GPU runtime
+
+---
+
+## Fast-training mode added + critical EMA bug fixed (2026-07-08)
+
+User has limited Kaggle GPU quota and can't afford the full ~18-24h heterogeneous-ensemble
+training run (~6h for a single model). Added an opt-in fast mode to
+`modules/module_b_classifier.py` rather than permanently shrinking the paper's schedule:
+
+- `CONFIG['enable_fast_train']` / CLI `--fast` / `make_fast_config(cfg)` → 75 epochs instead
+  of 300, validation/checkpointing from epoch 10 instead of 225, 3-epoch warmup instead of 10,
+  lightweight 5-transform `KorniaAugmentPipeline(full=False)` instead of the full
+  `MultiViewpointAugmentor` + 10-transform pipeline. ~1.5-2h/model, ~12h for the 6-model
+  ensemble (vs ~6h/~24h full). Expected trade: ~1-2% lower final accuracy.
+- Full details, expected-accuracy tables, and a recommended fast-then-full two-phase workflow
+  are in the new `FAST_TRAINING_GUIDE.md` (repo root). Kaggle notebook cell snippet in the new
+  `KAGGLE_FAST_TRAINING_CELLS.md`.
+
+**Critical bug caught on recheck, before any GPU time was spent:** the first draft cut epochs
+but left `ema_decay=0.9999` unchanged. EMA has a time constant of `1/(1-decay)` steps — 0.9999
+= 10,000 steps. A 75-epoch run is only ~4,300 steps, so the EMA weights would have stayed
+**~65% initialization** by the end of training. This matters because `evaluate()` validates
+against `ema.module` (not the raw model) and checkpoints save `ema_state_dict`, which
+`load_ensemble()`/the dashboard load *first* — so fast mode would have silently produced a
+near-random checkpoint reporting a plausible-looking but meaningless val accuracy. Fixed:
+`make_fast_config()` now also sets `ema_decay=0.999` (1,000-step constant → ~1.4% init weight
+remaining at 75 epochs). Full-mode training (300 epochs, 0.9999) is untouched — the bug only
+existed in the interaction between short schedules and the paper's EMA decay constant. **If a
+future session shortens `epochs` again for any reason, re-check this ratio — the EMA constant
+does not automatically scale with schedule length.**
+
+Also fixed: `--fast` cut epochs but never set `enable_fast_train=True`, so the CLI path
+silently trained with the FULL augmentation pipeline despite the notebook path (which sets the
+flag directly) using the lightweight one — the two entry points diverged. `make_fast_config`
+now sets the flag itself, and `main()` just flips it and lets `train_full_pipeline` apply the
+config once, so CLI and notebook are provably identical.
+
+Two additional speedups added while in the file (help full-mode training too, zero accuracy
+cost): `torch.backends.cudnn.benchmark=True` on CUDA (auto-tunes conv kernels for the fixed
+224×224 input), `persistent_workers=True` in `build_loaders()` (workers survive across epochs
+instead of respawning each one).
+
+Committed as `36263dd` on `claude/init-gba5ns`, pushed. Verified via AST-parse +
+`make_fast_config` idempotency/no-mutation/CLI-parity logic checks only — no GPU/torch
+available in this container, so the actual training run and its accuracy/ECE numbers are still
+future work on Kaggle.
+
+---
+
+## Gap-analysis re-verification (2026-07-08) — all 4 gaps confirmed already closed
+
+User described 4 claimed gaps between the codebase and the KCI (2025) paper / professor's
+requirements (heterogeneous ensemble, FAR/MR split, hard-negative mining, Warning/Track/
+Engagement policy) for slide/report use, as if currently open. Read each relevant file directly
+(not just the docs) to verify — **all 4 were already closed**, from the
+`claude/model-gaps-ensemble-metrics-e4xysn` work now merged into this branch:
+
+1. `ARCHITECTURES` (6 distinct builders) + `train_ensemble()` defaulting to one-model-per-arch
+   — confirmed in `module_b_classifier.py`.
+2. `compute_far_mr()` — confirmed in `threat_metrics.py`.
+3. `CONFUSABLE_GROUPS` — confirmed in `hard_negative_mining.py`, and actually **ahead of** the
+   report (see the stale-doc pending item above).
+4. `map_confidence_to_policy()` — confirmed in `threat_policy.py`, matches the user's
+   description exactly (0.50/0.75/0.90 thresholds, RED/ORANGE/YELLOW ceiling).
+
+All 4 have matching `smoke_test.py` checks (`module_b.heterogeneous_ensemble`,
+`threat_metrics.far_mr`, `hard_negative_mining.mine`, `threat_policy.map_confidence`). No code
+changed in this pass — read-only verification. Real remaining work is execution, not
+implementation — see the 3 new 2026-07-08 pending-list items above (train the ensemble on GPU;
+tune thresholds against real data; fix the stale doc).
 
 ---
 
