@@ -161,21 +161,36 @@ def save_patch(
     cv2.imwrite(str(dst), rgb)
 
 
+def save_frame(gray: np.ndarray, dst: Path) -> None:
+    """Save a full-frame grayscale uint8 image as 3-channel JPEG. Used by the
+    YOLO-format detection writer (data/{split}/images/) — unlike save_patch's
+    fixed IMG_SIZE crop, frames vary in size, so this writes as-is."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    cv2.imwrite(str(dst), rgb)
+
+
+def write_yolo_labels(dst: Path, boxes: list[tuple[int, float, float, float, float]]) -> None:
+    """Write YOLO-format label lines: 'class_id cx cy w h' (normalised [0,1]),
+    one row per box, matching MosaicDataset's expected layout."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"{cid} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}" for cid, cx, cy, w, h in boxes]
+    dst.write_text("\n".join(lines) + ("\n" if lines else ""))
+
+
 # ---------------------------------------------------------------------------
 # Full preprocessing chain for one annotation
 # ---------------------------------------------------------------------------
 
-def process_annotation(
-    ann: dict,
-    target_class: str,
-    is_thermal: bool,
-) -> np.ndarray | None:
+def load_frame(ann: dict) -> np.ndarray | None:
     """
-    Load image (or video frame), apply optical→thermal conversion (if needed),
-    extract ROI. Returns uint8 grayscale patch (IMG_SIZE×IMG_SIZE) or None.
+    Load the full source image (or video frame) an annotation points at.
+    Returns BGR uint8 (H, W, 3), or None on any read failure.
 
     Video frames: annotation must carry _frame_idx; VideoCapture seeks to that
-    frame instead of using cv2.imread.
+    frame instead of using cv2.imread. Shared by process_annotation (crops
+    for classification) and the detection-format writer (full frames) so both
+    paths decode identically.
     """
     try:
         frame_idx = ann.get("_frame_idx")
@@ -191,6 +206,35 @@ def process_annotation(
             img = cv2.imread(str(ann["image_path"]), cv2.IMREAD_COLOR)
             if img is None:
                 return None
+        return img
+    except Exception:
+        return None
+
+
+def to_ir_look(img_bgr: np.ndarray, is_thermal: bool) -> np.ndarray:
+    """
+    Class-agnostic optical→pseudo-thermal conversion (no per-class intensity
+    remap — that needs a single target class, which a full multi-object
+    detection frame doesn't have). Returns uint8 grayscale (H, W).
+    """
+    if is_thermal:
+        return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY) if img_bgr.ndim == 3 else img_bgr
+    return optical_to_pseudo_thermal(img_bgr)
+
+
+def process_annotation(
+    ann: dict,
+    target_class: str,
+    is_thermal: bool,
+) -> np.ndarray | None:
+    """
+    Load image (or video frame), apply optical→thermal conversion (if needed),
+    extract ROI. Returns uint8 grayscale patch (IMG_SIZE×IMG_SIZE) or None.
+    """
+    try:
+        img = load_frame(ann)
+        if img is None:
+            return None
 
         if not is_thermal:
             gray = optical_to_pseudo_thermal(img)
