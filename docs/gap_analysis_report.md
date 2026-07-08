@@ -160,9 +160,14 @@ exactly the confusion the paper measured.
 ### What changed in code
 
 New module `modules/hard_negative_mining.py`:
-- `CONFUSABLE_GROUPS = [{"F16", "MiG19", "MiG21"}]` — extensible list of class-name
-  sets known to be visually similar; add more groups as new confusions are found
-  (e.g. from a future confusion-matrix run over the full 43-class REATS taxonomy).
+- `CONFUSABLE_GROUPS` — extensible list of class-name sets known to be visually
+  similar. Now 3 groups: `{F16, MiG19, MiG21}` (the paper's own confusion
+  matrix — similar fighter silhouettes), plus `{BMP2, Bradley, K21}` (IFV/APC
+  bleed) and `{T72, T90, Leopard2}` (MBT bleed), added after the 2026-07-04
+  Kaggle GPU run reproduced the fighter confusion and additionally found these
+  two on the full 43-class taxonomy (GROUND-domain accuracy was 85.2% vs.
+  95.7%/99.75% for AIR/NAVAL that run) — add more groups as new confusions are
+  found.
 - `mine_hard_negatives(model, dataset, device, confusable_ids=None, margin_thresh=0.15)`
   — for every sample whose true label falls in a confusable group, flags it as a hard
   negative if the model misclassifies it, **or** if its softmax top-1/top-2 margin is
@@ -267,7 +272,8 @@ disturbing `CLASSES`/`NUM_CLASSES`/`RED_THREATS`.
   ready; the training run itself needs a GPU session, same as the existing homogeneous
   ensemble backlog in `MEMORY.md`).
 - Running `hard_negative_mining.py` against a real trained checkpoint to confirm the
-  fine-tune pass measurably reduces F16/MiG19/MiG21 confusion (the mining/fine-tune
+  fine-tune pass measurably reduces confusion across all 3 `CONFUSABLE_GROUPS`
+  (F16/MiG19/MiG21, BMP2/Bradley/K21, T72/T90/Leopard2 — the mining/fine-tune
   logic is implemented and unit-tested against synthetic data, but its effect on real
   accuracy can only be measured with a trained model and real val data).
 - Tuning the `operational_policy` confidence thresholds against real FAR/MR
