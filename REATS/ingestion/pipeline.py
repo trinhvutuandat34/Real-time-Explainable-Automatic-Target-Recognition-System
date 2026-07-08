@@ -43,7 +43,10 @@ from ingestion.formats import (
     parse_coco, parse_yolo, parse_xml, parse_csv,
     parse_folder, parse_video_folder, parse_filename_prefix,
 )
-from ingestion.preprocessor import process_annotation, save_patch
+from ingestion.preprocessor import (
+    process_annotation, save_patch,
+    load_frame, to_ir_look, save_frame, write_yolo_labels,
+)
 
 # ---------------------------------------------------------------------------
 # Label map loader
@@ -667,6 +670,124 @@ class IngestPipeline:
 
     # ------------------------------------------------------------------
 
+    def run_detection(
+        self,
+        split_ratios: tuple[float, float, float] = (0.7, 0.15, 0.15),
+        dry_run: bool = False,
+    ) -> dict:
+        """
+        Write a YOLO-format detection split — data/{split}/images/*.jpg +
+        data/{split}/labels/*.txt (class cx cy w h, normalised) — for
+        Module A (IRDetector.train() / MosaicDataset). This is separate from
+        run(), which crops one classification patch per annotation for
+        Module B: detection needs the *full* frame plus every box on it
+        together, so annotations are grouped by source image here instead of
+        by class.
+
+        Only annotations carrying a real bbox are used. Folder/video-folder
+        datasets with no localisation info use bbox=None ("whole image is
+        the object", the convention run()/extract_roi rely on for
+        classification crops) — labelling the entire frame as one box would
+        be systematically wrong wherever the target doesn't fill the frame,
+        so those are skipped here rather than turned into bad boxes.
+
+        Returns {split: {"images": n, "boxes": n}}.
+        """
+        assert abs(sum(split_ratios) - 1.0) < 1e-6, "split_ratios must sum to 1.0"
+        splits = ["train", "val", "test"]
+
+        by_class = self._collect_by_class()
+
+        # Group by unique source image — the same frame can carry several
+        # annotations (different objects, possibly different classes).
+        groups: dict[tuple, list[dict]] = defaultdict(list)
+        skipped_no_bbox = 0
+        for anns in by_class.values():
+            for ann in anns:
+                if ann.get("bbox") is None:
+                    skipped_no_bbox += 1
+                    continue
+                key = (ann["_dataset"], str(ann["image_path"]), ann.get("_frame_idx"))
+                groups[key].append(ann)
+
+        image_keys = list(groups.keys())
+        self.rng.shuffle(image_keys)
+
+        n       = len(image_keys)
+        n_train = int(n * split_ratios[0])
+        n_val   = int(n * split_ratios[1])
+        split_of: dict[tuple, str] = {}
+        for i, key in enumerate(image_keys):
+            split_of[key] = "train" if i < n_train else ("val" if i < n_train + n_val else "test")
+
+        W = 66
+        print(f"\n{'='*W}")
+        print("  REATS Detection-Format Ingestion (YOLO images/ + labels/)")
+        print(f"  Unique images : {n}  (skipped {skipped_no_bbox} bbox-less annotation(s))")
+        print(f"  Split ratios  : train={split_ratios[0]:.0%} "
+              f"val={split_ratios[1]:.0%} test={split_ratios[2]:.0%}")
+        if dry_run:
+            print("  *** DRY RUN — no files will be written ***")
+        print(f"{'='*W}\n")
+
+        written = {s: {"images": 0, "boxes": 0} for s in splits}
+        decode_failed = 0
+
+        for key, anns in groups.items():
+            split = split_of[key]
+            ds_key, image_path, frame_idx = key
+            is_thermal = anns[0]["_thermal"]
+
+            img = load_frame(anns[0])
+            if img is None:
+                decode_failed += 1
+                continue
+            gray = to_ir_look(img, is_thermal)
+            h, w = gray.shape[:2]
+            if h == 0 or w == 0:
+                decode_failed += 1
+                continue
+
+            boxes = []
+            for ann in anns:
+                x1, y1, x2, y2 = ann["bbox"]
+                x1, x2 = sorted((max(0, min(x1, w)), max(0, min(x2, w))))
+                y1, y2 = sorted((max(0, min(y1, h)), max(0, min(y2, h))))
+                if x2 - x1 < 1 or y2 - y1 < 1:
+                    continue
+                cx = ((x1 + x2) / 2) / w
+                cy = ((y1 + y2) / 2) / h
+                bw = (x2 - x1) / w
+                bh = (y2 - y1) / h
+                cx, cy, bw, bh = (min(max(v, 0.001), 0.999) for v in (cx, cy, bw, bh))
+                boxes.append((CLASSES.index(ann["_class"]), cx, cy, bw, bh))
+
+            if not boxes:
+                continue
+
+            stem_src = Path(image_path).stem
+            stem = f"{ds_key}__{stem_src}" + (f"__f{frame_idx:04d}" if frame_idx is not None else "")
+            stem = "".join(c if (c.isalnum() or c in "_-") else "_" for c in stem)[:180]
+
+            if not dry_run:
+                save_frame(gray, self.out_root / split / "images" / f"{stem}.jpg")
+                write_yolo_labels(self.out_root / split / "labels" / f"{stem}.txt", boxes)
+
+            written[split]["images"] += 1
+            written[split]["boxes"]  += len(boxes)
+
+        print(f"{'─'*W}")
+        print("  Summary (written this run):")
+        for split in splits:
+            print(f"    {split:<6}  images={written[split]['images']:<5}  boxes={written[split]['boxes']}")
+        if decode_failed:
+            print(f"    (skipped {decode_failed} image(s) that failed to decode)")
+        print(f"{'='*W}\n")
+
+        return written
+
+    # ------------------------------------------------------------------
+
     def _update_provenance(self, written: dict) -> None:
         """
         Merge this run's per-class counts into out_root/provenance.json as
@@ -728,6 +849,11 @@ Example (Kaggle):
     parser.add_argument("--test",    type=int, default=200)
     parser.add_argument("--seed",    type=int, default=42)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--detection", action="store_true",
+        help="Also write a YOLO-format detection split (data/{split}/images,labels) "
+             "for Module A, alongside the classification split for Module B.",
+    )
     args = parser.parse_args()
 
     datasets = {}
@@ -749,6 +875,8 @@ Example (Kaggle):
         seed=args.seed,
     )
     pipe.run(dry_run=args.dry_run)
+    if args.detection:
+        pipe.run_detection(dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
