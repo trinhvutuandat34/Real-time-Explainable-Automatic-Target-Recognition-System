@@ -1,7 +1,7 @@
 # MEMORY.md — REATS Session State
 
-Last updated: 2026-07-07
-Active branch: `claude/init-gba5ns`
+Last updated: 2026-07-08
+Active branch: `claude/ponytail-codebase-review-ubhpw2`
 
 ---
 
@@ -16,7 +16,7 @@ Running log of architectural decisions, bug fixes, and session context so that f
 `notebooks/01_kaggle_full_pipeline.ipynb` is the primary execution environment — it runs natively on Kaggle. All REATS modules (A–E) are implemented and the dashboard is functional. **A real GPU training run completed on Kaggle 2026-07-04** — see "Kaggle run results" below; it's the ground truth for what still needs work, superseding guesses made from synthetic-data smoke tests alone. That run has not yet been repeated since.
 
 ### What is working
-- Module A: `IRDetector` YOLOv4 pure-PyTorch, forward pass + NMS (bootstrapped from COCO darknet weights; heads untrained on IR — 0 detections on real IR input by design until fine-tuned)
+- Module A: `IRDetector` YOLOv4 pure-PyTorch, forward pass + NMS (bootstrapped from COCO darknet weights). As of 2026-07-08 the notebook can actually fine-tune it — see "Module A detection training pipeline added" below — but that fine-tuning has not yet been run on Kaggle, so until it has, heads are still untrained on IR and detection stays 0 on real input by design.
 - Module B: heterogeneous 6-architecture ensemble (ConvNeXt_tiny/ResNeXt50/ViT_b_16/Swin_T/VGG16/ResNet18), AMP + EMA, TemperatureScaler calibration, hard-negative mining (3 confusable groups)
 - Module C: GradCAM / GradCAM++ / EigenCAM, SHAP, LIME, MCDropout, faithfulness AUC — Grad-CAM batched per-chunk in Module D
 - Module D: Streamlit 5-tab dashboard (Live Analysis, Batch, Calibration, About, iPhone Live) — FAR/MR + Warning/Track/Engagement policy wired in; ROI classification batched device-aware (see below)
@@ -25,15 +25,33 @@ Running log of architectural decisions, bug fixes, and session context so that f
 - Notebook: runs natively on Kaggle, datasets mounted via **+ Add Input** (see "Kaggle revert" below)
 
 ### What is pending
+- **Run `c-ingest-detection` + `c-train-detector` on Kaggle** (added 2026-07-08, never yet executed) to confirm: (a) at least one attached dataset actually has real bbox annotations (`c-ingest-detection` prints the image/box count — several `format` = coco/yolo/xml/csv datasets should qualify, but this hasn't been observed on a real run), and (b) training actually drives mAP@0.5 above 0 within the epoch budget so `detector_trained.pt` gets saved. Until this runs, Module A fine-tuning is infrastructure-complete but unverified.
 - Fix the 7 zero-mapped-label datasets flagged by the 2026-07-04 run (partially addressed; HRSC2016 may need dataset-content verification, not just a code fix)
 - **New**: add `ingestion/label_maps.yaml` entries for the 5 datasets added 2026-07-05 (`Ships_Satellite`, `SARScope_Maritime`, `Thermal_Ships`, `Aerial_Vehicle_Detection`, `Battle_Tank_UAV`) — none have a mapping yet; inspect via the ingestion pipeline's own UNMAPPED report first, don't guess
-- Fine-tune Module A on labeled IR detection data (mAP@0.5 currently unmeasured — bootstrapped detector fires on COCO classes, not IR blobs)
+- ~~Fine-tune Module A on labeled IR detection data~~ — superseded by the pending item above; the data pipeline and training cell now exist, only the actual Kaggle run is outstanding
 - Investigate faithfulness AUC failure (0.49 deletion, target ≥0.80) — likely tied to the 81%-synthetic corpus, needs real-data share to grow before re-testing
 - Re-run hard-negative fine-tune (`hard_negative_mining.py`) against a real trained checkpoint to confirm it reduces the fighter-jet and armored-vehicle confusion the Kaggle run's confusion matrix showed
 - **New**: re-run the full pipeline natively on Kaggle (datasets mounted via + Add Input, including the 5 new ones + `Battle_Tank_UAV` specifically targeting the GROUND-domain confusion, plus the restored `Airbus_Aircraft` key) to get a post-fix accuracy/FAR-MR baseline — the 93.12%/85.2%-GROUND numbers below are all pre-new-dataset
 - **Partly done (2026-07-06 ingest run, see "Kaggle path sync" below):** of the 9 previously-unverified `c-config` paths, 4 now confirmed resolving (`Ships_Satellite`, `Thermal_Ships`, and `SARScope_Maritime`/`Battle_Tank_UAV` after the user repointed the latter two at notebook-output substitutes). Still unresolved: `Aerial_Vehicle_Detection` (user pasted a malformed path — see below), `HIT_UAV_v2`, `Dataset2_Folders` (neither attached that run); the 2 fallback mirrors stayed untested because both primaries resolved
 - **Largely resolved 2026-07-06 (see "Ingestion parser fixes" below):** the "UNMAPPED = wrapper-directory names" symptom (`images`, `jpegimages`, `masks`, …) was NOT a wrapper-dir-descent issue — it was `_find_image` over-stripping Roboflow `.rf.HASH` stems, making YOLO parsers return 0 and folder-fall-back. Fixed. `SARScope_Maritime`, `Thermal_Ships`, `Ships_Vessels_Aerial` now map real naval data. Still open: `HRSC2016` (path/mirror), `SWIM` (rotated-box XML), `Ships_Satellite` (filename-prefix classification format), `Aerial_Segmentation` (land-cover only — dead end), and the `Battle_Tank_UAV`/`Aerial_Vehicle_Detection` junk substitute paths
 - iPhone Live tab: requires second tunnel (Cloudflare) when phone is not on same WiFi as the notebook's GPU runtime
+
+---
+
+## Dashboard GPU device bug + Module A detection training pipeline added (2026-07-08)
+
+A user reported the dashboard's Live Analysis tab showing 84.6ms latency (target 40ms) and "No targets detected" on an uploaded image, on what was presumably a Kaggle GPU session. Root-caused two independent issues:
+
+- **Classifier silently ran on CPU regardless of GPU availability.** `load_pipeline()` built the detector via `IRDetector(weights=...)`, which auto-selects `cuda`, but never moved the classifier there — every input tensor built by `run_pipeline()`, the Calibration tab, and `preprocess_roi()` (iPhone Live Feed) was left on CPU too. Fixed by adding a `_classifier_device()` helper and moving the classifier + input tensors to it consistently across all 4 inference call sites. This also uncovered two dormant `.numpy()`-on-GPU-tensor crashes in `_grad_cam_batch`/`_eigen_cam` that had only "worked" because the classifier was always on CPU — fixed alongside.
+- **"No targets detected" was expected, not a bug**: `detector_bootstrap.pt` only carries COCO backbone/neck weights (`bootstrap_detector_weights.py` explicitly strips detection heads on class-count mismatch) — heads were randomly initialized for the 43-class IR taxonomy, and nothing in the ingestion pipeline wrote data in the format `IRDetector.train()`/`MosaicDataset` expects (`data/{split}/images/*.jpg` + `labels/*.txt`, YOLO `class cx cy w h`) — `IngestPipeline.run()` only ever wrote classification crops for Module B.
+
+Closed the second gap:
+- `ingestion/preprocessor.py`: split `process_annotation`'s image-loading branch into a reusable `load_frame()`; added `to_ir_look()` (class-agnostic thermal-look conversion — no per-class intensity remap, since a full multi-object frame has no single target class) and `save_frame()`/`write_yolo_labels()`.
+- `ingestion/pipeline.py`: added `IngestPipeline.run_detection()` — groups the same label-mapped annotations by *source image* instead of by class, assigns each image to one split, writes full frame + YOLO box labels. Annotations with `bbox=None` (folder/video-folder datasets — class label only, no localisation) are skipped rather than turned into a whole-frame box. **Resume-safe**: computes each image's output stem deterministically up front and skips anything already written by a prior call, so re-running after attaching a new Kaggle dataset mid-session doesn't reshuffle `self.rng` (shared, stateful, with `run()`) across already-written images — an earlier version of this fix did reshuffle on every call, which could silently move an image from train to val/test on a second run and leak it across both. Added `--detection` CLI flag.
+- Notebook: `c-ingest-detection` (after `c-ingest`) runs the new pass; `c-train-detector` (Section 5, after the bootstrap cell) actually trains Module A, warm-started from the bootstrap checkpoint, epoch count tied to `enable_fast_train` (20 fast / 60 full), guards on ≥4 train images since `MosaicDataset`'s mosaic augmentation needs at least that many to sample from. Saves `checkpoints/detector_trained.pt`. The dashboard sidebar's "Detector weights path" default now prefers `detector_trained.pt` over `detector_bootstrap.pt` once it exists — previously the default was hardcoded to bootstrap, so even a fully trained detector would never load without the user manually retyping the path.
+- **Not yet verified**: none of this has run on a real Kaggle GPU session yet. `numpy`/`cv2` aren't installed in the dev sandbox this was written in, so verification was py_compile + notebook-JSON validity + an independent pure-Python reimplementation of the grouping/split/box-normalisation/resume-safety math (all passed) — not an actual execution. First real Kaggle run should confirm: (a) `c-ingest-detection` finds a nonzero image/box count from at least one bbox-carrying dataset, (b) `c-train-detector` actually saves a checkpoint (mAP@0.5 > 0 at some point in training).
+
+Same session also: wired `enable_fast_train`/`make_fast_config` (75-epoch fast mode) into the notebook itself (previously only existed in `module_b_classifier.py`, unreachable from the Kaggle notebook since `c-clone` pulled `main`, which didn't have it yet — see PR #65), and fixed a `persistent_workers` shared-memory accumulation issue between ensemble models in `train_full_pipeline`.
 
 ---
 
@@ -250,8 +268,11 @@ REATS/
   ingestion/
     formats.py                      parse_coco / parse_yolo / parse_xml / parse_csv / parse_folder / parse_video_folder
                                      + _iter_class_leaf_dirs (wrapper-dir descent)
-    preprocessor.py                 process_annotation() — handles _frame_idx for video
+    preprocessor.py                 process_annotation() — handles _frame_idx for video;
+                                     load_frame/to_ir_look/save_frame/write_yolo_labels for
+                                     the YOLO-format detection writer (2026-07-08)
     pipeline.py                     IngestPipeline / load_dataset_annotations / _collect_by_class
+                                     / run_detection() (YOLO-format split for Module A, resume-safe)
     label_maps.yaml                 label → class mapping per dataset key
   modules/
     module_a_detector.py            IRDetector (YOLOv4, pure PyTorch)
