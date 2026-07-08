@@ -195,4 +195,4 @@ CONFIG = {
 - Fast training uses the same data loaders, architectures, and loss functions as full training
 - Only hyperparameters (`epochs`, `best_epoch_start`) and augmentation complexity differ
 - Checkpoints are 100% compatible — a fast-trained checkpoint loads normally into the dashboard
-- MLflow experiment tracking continues to work (logs to `REATS_BASELINE_fast` experiment)
+- MLflow experiment tracking continues to work (logs to the `REATS-Baseline_fast` experiment)

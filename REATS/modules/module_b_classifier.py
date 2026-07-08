@@ -15,6 +15,7 @@ Hyperparams: AdamW lr=1e-4, batch=128, epochs=300 (or 75 in fast mode), checkpoi
 """
 
 import copy
+import gc
 import math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -635,6 +636,15 @@ def train_full_pipeline(
 
             if epoch % (5 if cfg.get("enable_fast_train", False) else 10) == 0:
                 print(f"[Epoch {epoch:3d}] loss={tr_loss:.4f} acc={tr_acc:.4f}")
+
+    # persistent_workers keeps this model's DataLoader workers — and the shared
+    # memory holding their prefetched batches — alive until the loader is GC'd.
+    # In train_ensemble that can happen only after the *next* model's loaders
+    # have already spawned their own workers, doubling worker/shm usage and
+    # risking a /dev/shm "Bus error" on Kaggle. Drop them deterministically so
+    # each model starts from a clean slate.
+    del train_loader, val_loader
+    gc.collect()
 
     return best_val_acc, ckpt_path
 
