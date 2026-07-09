@@ -363,6 +363,7 @@ dom_logits.sum().backward()
 - [`CLAUDE.md`](CLAUDE.md) — developer/agent guide: environment setup, commands, module implementation details, known pitfalls
 - [`docs/gap_analysis_report.md`](docs/gap_analysis_report.md) — paper-vs-implementation gap analysis (ensemble heterogeneity, FAR/MR, hard-negative mining, operational policy), each gap grounded in a paper citation
 - [`docs/gap_analysis_slides.md`](docs/gap_analysis_slides.md) — the same analysis as a slide deck
+- [`docs/kaggle_run_report.md`](docs/kaggle_run_report.md) — results from the real Kaggle GPU runs to date (accuracy/ECE/faithfulness/latency/mAP vs. paper targets, per-domain breakdown, real-vs-synthetic-data caveat)
 - [`MEMORY.md`](MEMORY.md) — running log of architectural decisions and bug fixes across sessions
 
 ---

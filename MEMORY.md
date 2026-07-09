@@ -1,7 +1,7 @@
 # MEMORY.md — REATS Session State
 
 Last updated: 2026-07-09
-Active branch: `claude/ponytail-codebase-review-ubhpw2`
+Active branch: `claude/reats-kaggle-results-51k84s`
 
 ---
 
@@ -38,6 +38,24 @@ Running log of architectural decisions, bug fixes, and session context so that f
 - **Partly done (2026-07-06 ingest run, see "Kaggle path sync" below):** of the 9 previously-unverified `c-config` paths, 4 now confirmed resolving (`Ships_Satellite`, `Thermal_Ships`, and `SARScope_Maritime`/`Battle_Tank_UAV` after the user repointed the latter two at notebook-output substitutes). Still unresolved: `Aerial_Vehicle_Detection` (user pasted a malformed path — see below), `HIT_UAV_v2`, `Dataset2_Folders` (neither attached that run); the 2 fallback mirrors stayed untested because both primaries resolved
 - **Largely resolved 2026-07-06 (see "Ingestion parser fixes" below):** the "UNMAPPED = wrapper-directory names" symptom (`images`, `jpegimages`, `masks`, …) was NOT a wrapper-dir-descent issue — it was `_find_image` over-stripping Roboflow `.rf.HASH` stems, making YOLO parsers return 0 and folder-fall-back. Fixed. `SARScope_Maritime`, `Thermal_Ships`, `Ships_Vessels_Aerial` now map real naval data. Still open: `HRSC2016` (path/mirror), `SWIM` (rotated-box XML), `Ships_Satellite` (filename-prefix classification format), `Aerial_Segmentation` (land-cover only — dead end), and the `Battle_Tank_UAV`/`Aerial_Vehicle_Detection` junk substitute paths
 - iPhone Live tab: requires second tunnel (Cloudflare) when phone is not on same WiFi as the notebook's GPU runtime
+
+---
+
+## Kaggle run report compiled — fast-training-mode run reviewed, full detail in `docs/kaggle_run_report.md` (2026-07-09)
+
+A second real GPU run (fast-training mode, 75 epochs — added to the codebase 2026-07-08, so this run postdates that commit) was reviewed from its own Kaggle notebook logs/artifacts and written up in newly-committed `docs/kaggle_run_report.md`, alongside a reconstruction of the 2026-07-04 `real-time-ex-03` run below (whose own standalone report was never committed — exactly the "lost report" failure mode this entry exists to avoid repeating a second time). Full detail, caveats, and cross-run comparison in that file; headline numbers only here, single ConvNeXt-tiny, 75 epochs / 53.7 min:
+
+| Metric | Target | Result |
+|---|---|---|
+| Accuracy (test) | ≥92% | 95.50% (**87.0% on real-backed classes only** — 33/43 classes are still synthetic-only; treat the blended number as architecture validation, not field accuracy) |
+| ECE, temp-scaled (T=0.838) | ≤0.05 | 0.0175 PASS (raw 0.0742 FAIL) |
+| Faithfulness AUC (deletion / insertion) | ≥0.80 | 0.245 / 0.751 — both FAIL, deletion notably worse than the 07-04 run's 0.4908 |
+| End-to-end latency | ≤40ms | 81.7ms FAIL (down from 111.9ms, but that prior figure included one-time Grad-CAM construction cost per the 07-05 fix below — not an apples-to-apples 30ms speedup) |
+| Detector mAP@0.5 (separate 20-epoch fast-mode attempt) | ≥75% | 0.0003→0.0011 — effectively untrained, ~2,687 spurious boxes on a trivial demo frame |
+
+Per-domain: AIR 97.8%, GROUND 95.3% (up sharply from 07-04's 85.23% — cause unconfirmed), **NAVAL 86.7%** (down sharply from 07-04's 99.75% — now the weak domain; plausibly the 07-06 ingestion fixes adding harder *real* naval images into a domain that was previously almost entirely synthetic-and-easy, but unverified — see report §5). Dashboard launched and ran end-to-end successfully with a public tunnel. Real-image-backed classes now 10/43 (up from 8/43), but this run's own UNMAPPED report reportedly still listed `SARScope_Maritime`, which conflicts with the 2026-07-06 "Ingestion parser fixes" entry below marking it fixed — possibly a stale `c-clone` (same class of issue as "Crash 1" below), unconfirmed; worth checking which commit this run actually pulled next time it's repeated.
+
+Ensemble still never triggered (single model cleared 92% again, same auto-skip as 07-04). Detector training still has not produced a usable model in any run to date, including this one — unclear whether it ran before or after the two crash fixes in "First real Kaggle run of the detection pipeline" directly below; either way, a clean detector-training run on current `main` is still unconfirmed.
 
 ---
 
