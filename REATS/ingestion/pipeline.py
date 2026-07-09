@@ -26,6 +26,7 @@ Usage (Python):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import random
 import sys
 from collections import Counter, defaultdict
@@ -736,14 +737,36 @@ class IngestPipeline:
         def _stem_for(key: tuple) -> str:
             ds_key, image_path, frame_idx = key
             stem_src = Path(image_path).stem
-            stem = f"{ds_key}__{stem_src}" + (f"__f{frame_idx:04d}" if frame_idx is not None else "")
-            return "".join(c if (c.isalnum() or c in "_-") else "_" for c in stem)[:180]
+            readable = f"{ds_key}__{stem_src}" + (f"__f{frame_idx:04d}" if frame_idx is not None else "")
+            readable = "".join(c if (c.isalnum() or c in "_-") else "_" for c in readable)[:150]
+            # The readable prefix alone can collide: two different source
+            # images can share a basename (per-video-frame folders, per-scene
+            # dumps that both number frames from 0001.jpg), and sanitisation
+            # collapses distinct characters (space, ':', etc.) to the same
+            # "_". A short hash of the FULL, unsanitised key makes every stem
+            # unique regardless of what the readable part collides on, while
+            # staying deterministic across calls — required for resume-safety
+            # (same source must always produce the same stem).
+            digest = hashlib.sha1(f"{ds_key}|{image_path}|{frame_idx}".encode()).hexdigest()[:10]
+            return f"{readable}_{digest}"
 
+        # A stem counts as "already ingested" only if BOTH its image and
+        # label file exist — not just the image. If a prior call was
+        # interrupted (Kaggle timeout/OOM) between save_frame() and
+        # write_yolo_labels() below, the .jpg exists but the .txt doesn't;
+        # checking images/ alone would treat that stem as done and skip it
+        # forever, permanently leaving an unlabelled image that either
+        # breaks or silently mistrains MosaicDataset. Requiring both makes
+        # an interrupted write self-heal on the next call instead.
         existing_stems: set[str] = set()
         for split in splits:
             img_dir = det_root / split / "images"
+            lbl_dir = det_root / split / "labels"
             if img_dir.exists():
-                existing_stems.update(p.stem for p in img_dir.iterdir() if p.is_file())
+                existing_stems.update(
+                    p.stem for p in img_dir.iterdir()
+                    if p.is_file() and (lbl_dir / f"{p.stem}.txt").exists()
+                )
 
         new_keys = [k for k in groups if _stem_for(k) not in existing_stems]
         resumed  = len(groups) - len(new_keys)
@@ -752,6 +775,7 @@ class IngestPipeline:
         n       = len(new_keys)
         n_train = int(n * split_ratios[0])
         n_val   = int(n * split_ratios[1])
+        n_test  = n - n_train - n_val
         split_of: dict[tuple, str] = {}
         for i, key in enumerate(new_keys):
             split_of[key] = "train" if i < n_train else ("val" if i < n_train + n_val else "test")
@@ -764,6 +788,18 @@ class IngestPipeline:
               f"already-ingested={resumed}  (skipped {skipped_no_bbox} bbox-less annotation(s))")
         print(f"  Split ratios  : train={split_ratios[0]:.0%} "
               f"val={split_ratios[1]:.0%} test={split_ratios[2]:.0%}")
+        if n > 0 and (n_val == 0 or n_test == 0):
+            # Truncating int(n * ratio) on a small new-image batch can zero
+            # out a split entirely (e.g. n=5 at 0.7/0.15/0.15 -> train=3
+            # val=0 test=1). Each ingestion call only splits its OWN new
+            # images — it doesn't rebalance across calls — so this is a
+            # per-call gap, not necessarily a global one; it self-corrects
+            # as more datasets get attached and ingested over time, but a
+            # single small/first run can leave val or test with zero images.
+            print(f"  WARNING: this run's split (train={n_train} val={n_val} test={n_test}) "
+                  f"left a split empty — too few new images for these ratios. Training "
+                  f"tolerates an empty val (mAP stays 0, no checkpoint saved) rather than "
+                  f"crashing, but expect this to resolve once more datasets are ingested.")
         if dry_run:
             print("  *** DRY RUN — no files will be written ***")
         print(f"{'='*W}\n")
