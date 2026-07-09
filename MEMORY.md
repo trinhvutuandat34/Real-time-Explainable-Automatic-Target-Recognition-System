@@ -198,11 +198,11 @@ tonight's specific deadline):
   `CONFIG['epochs']`/`CONFIG['best_epoch_start']` instead of a hardcoded "75 ep, ~12h" string, so
   it stays accurate if `QUOTA_EPOCHS` is changed again.
 - `c-train-single`: added a comment flagging it as skippable under this quota — the notebook's
-  own recommended run order goes straight to `c-train-ensemble`, which already has a resume-safe
-  `NameError` fallback (`best_val_acc = 0.0` if the single-model cell never ran) so it trains all
-  6 architectures unconditionally either way. Running `c-train-single` first would burn another
-  ~1-1.3h (60/75 of fast mode's ~1.5-2h/model) that the 10.5h budget can't spare on top of the
-  ~6-model ensemble.
+  own recommended run order goes straight to `c-train-ensemble`, which (as of this session)
+  trains all 6 architectures unconditionally regardless — see the dated section below, which
+  removed the `best_val_acc`-gated skip this bullet originally relied on. Running
+  `c-train-single` first would burn another ~1-1.3h (60/75 of fast mode's ~1.5-2h/model) that the
+  10.5h budget can't spare on top of the ~6-model ensemble.
 
 **EMA re-check** (per the standing warning two sections up — the constant does not automatically
 scale with schedule length): 60 epochs ≈ 3,440 steps (80% of the 75-epoch/~4,300-step figure
@@ -220,6 +220,32 @@ a real `c-ingest` UNMAPPED report against live Kaggle-mounted data, not guessabl
 hack, not a permanent change — once the 7/10 deadline has passed, consider reverting it to
 `None` (or removing the override block entirely) so the notebook goes back to fast mode's normal
 75-epoch/~12h preset for future runs, unless a similarly tight window recurs.
+
+---
+
+## `c-train-ensemble`'s accuracy-gated skip removed — always trains all 6 (2026-07-09)
+
+User explicitly wants all 6 architectures trained even if `c-train-single`'s ConvNeXt_tiny alone
+clears 0.92. The notebook previously did the opposite: `c-train-ensemble` computed
+`TRAIN_ENSEMBLE = best_val_acc < 0.92` and printed "ensemble not needed" + `USE_ENSEMBLE = False`
+whenever the single model passed the accuracy bar — every downstream cell (`c-eval-metrics`,
+temperature scaling, hard-negative mining, Grad-CAM, faithfulness, `c-pipeline`) branches on
+`USE_ENSEMBLE`, so that one flag silently decided single-model-only for the rest of the notebook.
+This directly conflicts with requirement #1 in the professor's spec (heterogeneous 6-architecture
+ensemble) — a single ConvNeXt_tiny hitting the accuracy target is not a substitute for training
+the other 5 required architectures.
+
+Fixed in `c-train-ensemble`: removed the `best_val_acc < 0.92` gate and the `best_val_acc`
+resume-recovery block it needed (no longer read anywhere in this cell). It now unconditionally
+calls `train_ensemble(CONFIG, ckpt_dir=str(CKPT_DIR))` and sets `USE_ENSEMBLE = True` every time.
+Also updated `c-train-single`'s status messages (previously "CLOSE -> run ensemble cell below" /
+"FAIL -> run ensemble cell below", implying a PASS meant skipping it) and `c-config`'s quota-plan
+print, both of which referenced the now-removed gate/fallback — a future session must not
+reintroduce an accuracy-based skip here without the user asking for it again.
+
+`c-eval-metrics`'s own independent `USE_ENSEMBLE` resume fallback (checks whether all 6
+architecture checkpoints exist on disk) was left as-is — it already resumes to the ensemble
+correctly and needed no change.
 
 ---
 
