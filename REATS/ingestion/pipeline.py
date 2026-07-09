@@ -674,15 +674,28 @@ class IngestPipeline:
         self,
         split_ratios: tuple[float, float, float] = (0.7, 0.15, 0.15),
         dry_run: bool = False,
+        detection_root: "str | Path | None" = None,
     ) -> dict:
         """
-        Write a YOLO-format detection split — data/{split}/images/*.jpg +
-        data/{split}/labels/*.txt (class cx cy w h, normalised) — for
+        Write a YOLO-format detection split — {detection_root}/{split}/images/*.jpg +
+        {detection_root}/{split}/labels/*.txt (class cx cy w h, normalised) — for
         Module A (IRDetector.train() / MosaicDataset). This is separate from
         run(), which crops one classification patch per annotation for
         Module B: detection needs the *full* frame plus every box on it
         together, so annotations are grouped by source image here instead of
         by class.
+
+        detection_root defaults to out_root/"detection" — deliberately NOT
+        out_root/{split}/ itself. run()'s classification loader
+        (torchvision ImageFolder, via build_loaders()) treats every
+        subdirectory of out_root/{split}/ as a class name; writing
+        out_root/{split}/images/ and .../labels/ there would add two bogus
+        "classes" to Module B's training set, and ImageFolder hard-crashes
+        the moment it finds one with zero image-extension files in it
+        ("Found no valid file for the classes labels" — "labels" there is a
+        literal class name, not a description). Keeping detection data in
+        its own subtree makes that collision impossible regardless of what
+        run() does.
 
         Only annotations carrying a real bbox are used. Folder/video-folder
         datasets with no localisation info use bbox=None ("whole image is
@@ -704,6 +717,7 @@ class IngestPipeline:
         """
         assert abs(sum(split_ratios) - 1.0) < 1e-6, "split_ratios must sum to 1.0"
         splits = ["train", "val", "test"]
+        det_root = Path(detection_root) if detection_root is not None else self.out_root / "detection"
 
         by_class = self._collect_by_class()
 
@@ -727,7 +741,7 @@ class IngestPipeline:
 
         existing_stems: set[str] = set()
         for split in splits:
-            img_dir = self.out_root / split / "images"
+            img_dir = det_root / split / "images"
             if img_dir.exists():
                 existing_stems.update(p.stem for p in img_dir.iterdir() if p.is_file())
 
@@ -745,6 +759,7 @@ class IngestPipeline:
         W = 66
         print(f"\n{'='*W}")
         print("  REATS Detection-Format Ingestion (YOLO images/ + labels/)")
+        print(f"  Output        : {det_root.resolve()}")
         print(f"  Unique images : {len(groups)}  new={n}  "
               f"already-ingested={resumed}  (skipped {skipped_no_bbox} bbox-less annotation(s))")
         print(f"  Split ratios  : train={split_ratios[0]:.0%} "
@@ -792,8 +807,8 @@ class IngestPipeline:
             stem = _stem_for(key)
 
             if not dry_run:
-                save_frame(gray, self.out_root / split / "images" / f"{stem}.jpg")
-                write_yolo_labels(self.out_root / split / "labels" / f"{stem}.txt", boxes)
+                save_frame(gray, det_root / split / "images" / f"{stem}.jpg")
+                write_yolo_labels(det_root / split / "labels" / f"{stem}.txt", boxes)
 
             written[split]["images"] += 1
             written[split]["boxes"]  += len(boxes)

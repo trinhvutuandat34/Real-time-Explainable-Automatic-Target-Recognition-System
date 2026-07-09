@@ -25,7 +25,7 @@ Running log of architectural decisions, bug fixes, and session context so that f
 - Notebook: runs natively on Kaggle, datasets mounted via **+ Add Input** (see "Kaggle revert" below)
 
 ### What is pending
-- **Run `c-ingest-detection` + `c-train-detector` on Kaggle** (added 2026-07-08, never yet executed) to confirm: (a) at least one attached dataset actually has real bbox annotations (`c-ingest-detection` prints the image/box count — several `format` = coco/yolo/xml/csv datasets should qualify, but this hasn't been observed on a real run), and (b) training actually drives mAP@0.5 above 0 within the epoch budget so `detector_trained.pt` gets saved. Until this runs, Module A fine-tuning is infrastructure-complete but unverified.
+- **Re-run `c-ingest-detection` + `c-train-single` on Kaggle after pulling the 2026-07-08 fix below** — the first real attempt crashed `c-train-single` with `FileNotFoundError: Found no valid file for the classes labels` (see "run_detection() broke Module B training" below). Fixed in code; the user's existing Kaggle session still has the stale `data/{train,val,test}/{images,labels}/` directories on disk from the broken run and needs to delete them (they're gitignored, so a `c-clone` git-pull alone won't remove them) before re-running — see remediation steps in that section.
 - Fix the 7 zero-mapped-label datasets flagged by the 2026-07-04 run (partially addressed; HRSC2016 may need dataset-content verification, not just a code fix)
 - **New**: add `ingestion/label_maps.yaml` entries for the 5 datasets added 2026-07-05 (`Ships_Satellite`, `SARScope_Maritime`, `Thermal_Ships`, `Aerial_Vehicle_Detection`, `Battle_Tank_UAV`) — none have a mapping yet; inspect via the ingestion pipeline's own UNMAPPED report first, don't guess
 - ~~Fine-tune Module A on labeled IR detection data~~ — superseded by the pending item above; the data pipeline and training cell now exist, only the actual Kaggle run is outstanding
@@ -38,6 +38,29 @@ Running log of architectural decisions, bug fixes, and session context so that f
 - **Partly done (2026-07-06 ingest run, see "Kaggle path sync" below):** of the 9 previously-unverified `c-config` paths, 4 now confirmed resolving (`Ships_Satellite`, `Thermal_Ships`, and `SARScope_Maritime`/`Battle_Tank_UAV` after the user repointed the latter two at notebook-output substitutes). Still unresolved: `Aerial_Vehicle_Detection` (user pasted a malformed path — see below), `HIT_UAV_v2`, `Dataset2_Folders` (neither attached that run); the 2 fallback mirrors stayed untested because both primaries resolved
 - **Largely resolved 2026-07-06 (see "Ingestion parser fixes" below):** the "UNMAPPED = wrapper-directory names" symptom (`images`, `jpegimages`, `masks`, …) was NOT a wrapper-dir-descent issue — it was `_find_image` over-stripping Roboflow `.rf.HASH` stems, making YOLO parsers return 0 and folder-fall-back. Fixed. `SARScope_Maritime`, `Thermal_Ships`, `Ships_Vessels_Aerial` now map real naval data. Still open: `HRSC2016` (path/mirror), `SWIM` (rotated-box XML), `Ships_Satellite` (filename-prefix classification format), `Aerial_Segmentation` (land-cover only — dead end), and the `Battle_Tank_UAV`/`Aerial_Vehicle_Detection` junk substitute paths
 - iPhone Live tab: requires second tunnel (Cloudflare) when phone is not on same WiFi as the notebook's GPU runtime
+
+---
+
+## run_detection() broke Module B training — fixed (2026-07-08)
+
+The first real Kaggle run of the newly-added detection pipeline crashed `c-train-single` (Module B classification training, which runs *after* `c-ingest-detection` in cell order) with:
+
+```
+FileNotFoundError: Found no valid file for the classes labels. Supported extensions are: .jpg, .jpeg, ...
+```
+
+Root cause: `run_detection()` wrote `data/{split}/images/*.jpg` + `data/{split}/labels/*.txt` directly under the *same* `data/{split}/` root that `build_loaders()`'s `torchvision.datasets.ImageFolder` scans for Module B. `ImageFolder` treats every subdirectory of `data/{split}/` as a class name — it doesn't distinguish "real class folder" from "some other directory someone left here." So `images/` and `labels/` got picked up as two bogus classes, and `labels/` has zero `.jpg`/`.png`/etc. files in it (only `.txt`), which is exactly what `ImageFolder.make_dataset()`'s `FileNotFoundError` is checking for — "labels" in that error message is a literal (bogus) class name, not a description. This was introduced when `run_detection()` was added earlier the same day and not caught here because `numpy`/`cv2` aren't installed in the dev sandbox this was written in — the pure-Python logic tests run at the time covered the grouping/split-ratio/box-math correctness but had no way to exercise `ImageFolder`'s actual directory-scanning behavior. First real Kaggle GPU run caught it immediately.
+
+Fix: `run_detection()` now writes to `out_root/"detection"/{split}/images|labels/` — a separate subtree — instead of `out_root/{split}/images|labels/`. Added a `detection_root` parameter (defaults to the safe location) in case a caller wants a different path. Updated the notebook's `c-ingest-detection` (existing-file scan + zero-count check) and `c-train-detector` (`data_root=` passed to `IRDetector.train()`, and where it reads back `best.pt`) to point at `data/detection/` accordingly.
+
+**Remediation for a Kaggle session that already hit this**: the crash means `data/{train,val,test}/images/` and `.../labels/` already exist on disk from the broken run — these are gitignored (`data/**`), so re-running `c-clone` (git pull) does **not** remove them; only the code that *writes* to a new location changed, nothing cleans up the old one. Before re-running, delete the 6 stale directories:
+```python
+import shutil
+for s in ('train', 'val', 'test'):
+    for d in ('images', 'labels'):
+        shutil.rmtree(DATA_DIR / s / d, ignore_errors=True)
+```
+Then re-run `c-ingest-detection` (writes fresh under `data/detection/` this time) and `c-train-single` should no longer see the bogus classes.
 
 ---
 
