@@ -563,7 +563,18 @@ class MosaicDataset(Dataset):
                 adj[:, 4] = labels[:, 4] * ph / (s * 2)
                 all_labels.append(adj)
 
-        mosaic = cv2.resize(mosaic[cy - s // 2: cy + s // 2, cx - s // 2: cx + s // 2], (s, s))
+        # Clamp instead of letting a negative bound wrap via NumPy's
+        # from-the-end slice semantics: cx/cy are drawn from [s//4, 3s//4],
+        # so cy - s//2 (and cx - s//2) go negative whenever cy < s//2 (about
+        # half of all draws) — mosaic[-160:480] means index 1120:480 on a
+        # (2s, 2s) canvas, start > stop, an EMPTY slice that cv2.resize
+        # rejects with "(-215:Assertion failed) !ssize.empty()". Clamping
+        # keeps the crop non-empty in every case (width/height stays in
+        # [3s/4, s]) while preserving the intent: roughly an s×s window
+        # centred near (cx, cy).
+        cy0, cy1 = max(0, cy - s // 2), min(s * 2, cy + s // 2)
+        cx0, cx1 = max(0, cx - s // 2), min(s * 2, cx + s // 2)
+        mosaic = cv2.resize(mosaic[cy0:cy1, cx0:cx1], (s, s))
         combined = np.concatenate(all_labels, axis=0) if all_labels else np.zeros((0, 5), dtype=np.float32)
         combined[:, 1:] = combined[:, 1:].clip(0.001, 0.999)
         return mosaic, combined
