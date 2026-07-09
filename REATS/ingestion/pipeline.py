@@ -516,14 +516,28 @@ class IngestPipeline:
         self.split_targets = split_targets or {"train": 170, "val": 30, "test": 200}
         self.rng           = random.Random(seed)
         self.label_maps    = _load_label_maps()
+        # run() and run_detection() both call _collect_by_class() once per
+        # call — the notebook runs both back-to-back on the same pipe
+        # object, which used to re-parse every dataset (COCO/XML/YOLO decode
+        # + label resolution) twice for identical output. self.datasets is
+        # fixed for the lifetime of an instance (set once above, no setter
+        # exists), so caching here is safe: nothing can make a second call
+        # see different source data than the first.
+        self._by_class_cache: dict[str, list[dict]] | None = None
 
     # ------------------------------------------------------------------
 
     def _collect_by_class(self) -> dict[str, list[dict]]:
         """
         Load all datasets, map labels, group by REATS class.
-        Returns {class_id: [ann_dict, ...]}.
+        Returns {class_id: [ann_dict, ...]}. Cached after the first call —
+        see the comment on self._by_class_cache in __init__.
         """
+        if self._by_class_cache is not None:
+            print("  [ingest] Reusing dataset annotations already loaded by an "
+                  "earlier run()/run_detection() call on this pipeline.")
+            return self._by_class_cache
+
         by_class: dict[str, list[dict]] = defaultdict(list)
         # Cap per-class pool at 4× the max target to avoid memory bloat from
         # popular civilian labels like "car" (appears millions of times across datasets)
@@ -576,6 +590,7 @@ class IngestPipeline:
                 print(f"             fix: add these labels to ingestion/label_maps.yaml "
                       f"under {ds_key}")
 
+        self._by_class_cache = by_class
         return by_class
 
     # ------------------------------------------------------------------
