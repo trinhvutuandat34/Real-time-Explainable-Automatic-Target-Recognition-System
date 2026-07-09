@@ -311,8 +311,8 @@ def _grad_cam_batch(
                     return [None] * n
 
                 model.zero_grad(set_to_none=True)
-                idx = torch.arange(n)
-                tgt = torch.as_tensor(target_indices, dtype=torch.long)
+                idx = torch.arange(n, device=batch_in.device)
+                tgt = torch.as_tensor(target_indices, dtype=torch.long, device=batch_in.device)
                 logits[idx, tgt].sum().backward()   # one backward, whole chunk
 
                 grads  = acts.grad
