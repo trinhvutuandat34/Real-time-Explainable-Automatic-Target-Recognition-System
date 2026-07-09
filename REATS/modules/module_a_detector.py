@@ -435,13 +435,18 @@ class YOLOv4Loss(nn.Module):
             if gx >= W: gx = W - 1
             if gy >= H: gy = H - 1
 
-            bw_p = bw * W * stride  # pixel width
+            bw_p = bw * W * stride  # pixel width (bw is a tensor slice from t[4]; bw_p stays a tensor)
             bh_p = bh * H * stride
-            iou_anc = torch.min(anc_t[:, 0], torch.tensor(bw_p)) * \
-                      torch.min(anc_t[:, 1], torch.tensor(bh_p)) / \
+            # bw_p/bh_p are already tensors here — torch.min broadcasts a
+            # (A,) tensor against a 0-dim scalar tensor directly, no need to
+            # (and shouldn't) re-wrap with torch.tensor(existing_tensor),
+            # which UserWarns and does an unnecessary copy on every target
+            # box, every scale, every training step.
+            iou_anc = torch.min(anc_t[:, 0], bw_p) * \
+                      torch.min(anc_t[:, 1], bh_p) / \
                       (anc_t[:, 0] * anc_t[:, 1] + bw_p * bh_p -
-                       torch.min(anc_t[:, 0], torch.tensor(bw_p)) *
-                       torch.min(anc_t[:, 1], torch.tensor(bh_p)) + 1e-7)
+                       torch.min(anc_t[:, 0], bw_p) *
+                       torch.min(anc_t[:, 1], bh_p) + 1e-7)
 
             # suppress noobj for anchors with iou > threshold
             for ai in range(A):
