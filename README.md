@@ -123,20 +123,33 @@ section, not hardcoded in application code.
 
 ---
 
-## Performance targets
+## Performance — targets vs. reported results
 
-| Metric | Target |
-|---|---|
-| Classification accuracy | ≥ 92% |
-| ECE (calibration) | ≤ 0.05 |
-| mAP@0.5 (detection) | ≥ 75% |
-| End-to-end latency | ≤ 40 ms/frame |
-| Faithfulness AUC | ≥ 0.80 |
-| FPS | ≥ 20 |
+| Metric | Target | Reported result | Verdict |
+|---|---|---|---|
+| Classification accuracy | ≥ 92% | **93.12%** | PASS |
+| ECE (calibration) | ≤ 0.05 | 0.0395 temperature-scaled (raw 0.1226) | PASS (scaled) |
+| mAP@0.5 (detection) | ≥ 75% | not evaluated — bootstrapped detector untrained on IR by design | — |
+| End-to-end latency | ≤ 40 ms/frame | 111.9 ms | FAIL (~2.8×) |
+| FPS | ≥ 20 | ≈8.9 (derived from the latency figure, not independently benchmarked) | FAIL |
+| Faithfulness AUC | ≥ 0.80 | 0.49 deletion / 0.75 insertion | FAIL |
 
-Latency and FPS targets require GPU — CPU numbers are for architecture validation
-only. FAR/MR have no paper-given target; they're reported alongside these, not
-pass/fail gated.
+Reported results are from the 2026-07-04 full 300-epoch training run
+(`real-time-ex-03`, Tesla T4) — the training regime the paper itself specifies,
+and the only run whose figures are quoted here. Only 8 of 43 classes currently
+have real-image backing (the rest are synthetic-only), so treat classification
+accuracy as validated architecture performance on the current data mix, not a
+claim about real-world field accuracy. Detection has not produced a working
+model in any run to date — a separate, faster detector-training attempt
+reached mAP@0.5 of 0.0011. FAR/MR have no paper-given target; they're reported
+alongside these, not pass/fail gated.
+
+A separate fast-training-mode run measured a higher headline accuracy
+(95.50%) — deliberately **not** used above. Fast mode trades training quality
+for speed (an expected accuracy *drop*, not a gain), so its higher number
+reflects data-composition inflation rather than a better result. Full
+reasoning, per-domain breakdown, and visual evidence from both runs:
+[`docs/kaggle_run_report.md`](docs/kaggle_run_report.md).
 
 ---
 
