@@ -1,7 +1,7 @@
 # MEMORY.md — REATS Session State
 
 Last updated: 2026-07-09
-Active branch: `claude/reats-kaggle-results-51k84s`
+Active branch: `claude/pipeline-changes-5irodj`
 
 ---
 
@@ -171,6 +171,55 @@ Committed as `36263dd` on `claude/init-gba5ns`, pushed. Verified via AST-parse +
 `make_fast_config` idempotency/no-mutation/CLI-parity logic checks only — no GPU/torch
 available in this container, so the actual training run and its accuracy/ECE numbers are still
 future work on Kaggle.
+
+---
+
+## Notebook trimmed to 60-epoch quota override for the 7/9→7/10 10.5h window (2026-07-09)
+
+User has a hard deadline (10:30 AM 7/10) and only a 10.5h Kaggle T4×2 window — tighter than fast
+mode's default ~12h estimate at 75 epochs. A prior planning session (not this one — see the
+uploaded `SESSION_MEMORY_20260709.md`, not committed to the repo) had already picked "60 epochs
+× all 6 architectures" as the way to fit the window without dropping any of the professor's
+required architectures. That plan's own code snippet used config keys that don't actually exist
+in `module_b_classifier.py` (`CONFIG['num_epochs']`, `CONFIG['disable_validation_until']`) — the
+real keys are `epochs` and `best_epoch_start`. Pasted verbatim, those lines would have silently
+added two unused dict entries and changed nothing. Caught before any GPU time was spent.
+
+Implemented in `notebooks/01_kaggle_full_pipeline.ipynb` only (no `module_b_classifier.py`
+change — `make_fast_config()` stays the general-purpose 75-epoch preset for anyone not on
+tonight's specific deadline):
+- `c-config`: after `make_fast_config(CONFIG)` runs, a `QUOTA_EPOCHS = 60` override sets
+  `CONFIG['epochs'] = 60` (set to `None` to fall back to the normal 75-epoch fast preset).
+  `best_epoch_start` is deliberately **left at fast-mode's value of 10**, not pushed later to
+  ~50 the way the uploaded plan's snippet suggested — validation here costs only ~10-20% of a
+  train epoch (30 vs 170 imgs/class per the paper split), so delaying it saves some wall-clock
+  time but sharply narrows the checkpoint-search window from 50 epochs down to 10, right when a
+  short run most needs the wider search. The mode banner print is now computed from
+  `CONFIG['epochs']`/`CONFIG['best_epoch_start']` instead of a hardcoded "75 ep, ~12h" string, so
+  it stays accurate if `QUOTA_EPOCHS` is changed again.
+- `c-train-single`: added a comment flagging it as skippable under this quota — the notebook's
+  own recommended run order goes straight to `c-train-ensemble`, which already has a resume-safe
+  `NameError` fallback (`best_val_acc = 0.0` if the single-model cell never ran) so it trains all
+  6 architectures unconditionally either way. Running `c-train-single` first would burn another
+  ~1-1.3h (60/75 of fast mode's ~1.5-2h/model) that the 10.5h budget can't spare on top of the
+  ~6-model ensemble.
+
+**EMA re-check** (per the standing warning two sections up — the constant does not automatically
+scale with schedule length): 60 epochs ≈ 3,440 steps (80% of the 75-epoch/~4,300-step figure
+already measured). `ema_decay=0.999` (from `make_fast_config`, untouched by this change) has a
+1,000-step time constant, so residual-initialization weight at 60 epochs is `e^-3.44` ≈ 3%,
+against ~1.4% at 75 epochs — still negligible, no further EMA change needed.
+
+**Not done in this session** (no GPU/Kaggle access from this sandbox): the actual training run.
+This is a notebook edit only, meant to be reviewed and then run by hand on Kaggle. Also
+untouched: the 5 datasets still missing `ingestion/label_maps.yaml` entries (`Ships_Satellite`,
+`SARScope_Maritime`, `Thermal_Ships`, `Aerial_Vehicle_Detection`, `Battle_Tank_UAV`) — that needs
+a real `c-ingest` UNMAPPED report against live Kaggle-mounted data, not guessable from here.
+
+**Follow-up for a future session**: `QUOTA_EPOCHS = 60` in `c-config` is a deadline-specific
+hack, not a permanent change — once the 7/10 deadline has passed, consider reverting it to
+`None` (or removing the override block entirely) so the notebook goes back to fast mode's normal
+75-epoch/~12h preset for future runs, unless a similarly tight window recurs.
 
 ---
 
