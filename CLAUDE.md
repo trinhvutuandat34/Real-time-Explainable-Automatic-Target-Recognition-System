@@ -344,6 +344,8 @@ These are different parameter names — never mix them.
 
 **Negative-stride numpy:** `argsort(...)[::-1]` creates a negative-stride view that PyTorch rejects. Always `.copy()` after reversing: `order = np.argsort(sal.flatten())[::-1].copy()`.
 
+**Negative numpy slice start wraps instead of clamping:** `MosaicDataset._mosaic()` used to crop with `mosaic[cy - s//2 : cy + s//2, ...]`; since `cy` is drawn from `[s//4, 3s//4]`, `cy - s//2` goes negative for about half of all draws. NumPy treats a negative slice bound as "from the end" (`arr[-160:480]` on a 1280-row array means rows `1120:480`), not "clamp to 0" — start > stop produces a silently empty (not erroring) slice, which only surfaces downstream when something rejects the empty array (here, `cv2.resize`'s `!ssize.empty()` assertion). Fixed by clamping both bounds (`max(0, ...)`/`min(2*s, ...)`) — the same pattern `IRDetector.crop_roi()` already uses. This is a general trap, not specific to this one call site: any `arr[x - k : x + k]` where `x` can be less than `k` needs explicit clamping, since NumPy will never raise on the negative-start case, it just silently returns fewer (or zero) rows.
+
 **`device` variable scope:** `device` is set in `c-gpu`. If that cell was skipped, `c-clone` defines a fallback:
 ```python
 try:
