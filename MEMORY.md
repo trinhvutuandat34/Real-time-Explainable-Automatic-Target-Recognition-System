@@ -41,6 +41,26 @@ Running log of architectural decisions, bug fixes, and session context so that f
 
 ---
 
+## 8-angle code review found + fixed 5 more real bugs (2026-07-08)
+
+A full recall-biased code review (8 parallel finder agents: line-by-line, removed-behavior, cross-file, language-pitfalls, reuse, simplification, efficiency, altitude, conventions) of this session's cumulative diff. Three agents independently converged on the same set of correctness bugs from different angles — strong triangulation. All fixed and pushed.
+
+**Grad-CAM crashed silently on GPU** (`module_d_dashboard.py`, `_grad_cam_batch`): `idx`/`tgt` index tensors used to fancy-index `logits[idx, tgt]` were built with no `device=` argument, so they stayed on CPU even after the earlier session's fix moved the classifier (and hence `logits`) onto `cuda`. PyTorch fancy-indexing requires matching devices; this raised inside the function's own broad `except Exception`, so enabling the Grad-CAM/XAI checkbox on a GPU-loaded classifier silently returned `heatmap=None` for every detection with no visible error. Fixed by placing `idx`/`tgt` on `batch_in.device`.
+
+**`run_detection()` stem collisions** (`ingestion/pipeline.py`, `_stem_for`): two different source images could sanitize to the identical output filename — same basename in different folders (e.g. two per-scene dumps both containing `0001.jpg`), or two paths whose differing characters (`:`, space, etc.) both collapse to `_`. The second image's `save_frame()`/`write_yolo_labels()` call silently overwrote the first's on disk, while the run's printed summary still counted both. Fixed by appending a short deterministic hash of the full, un-sanitised key — collision-proof while staying reproducible across calls (required for resume-safety).
+
+**`run_detection()` orphaned images on interrupted writes**: resume-safety's "already ingested" check only looked at whether the `.jpg` existed, not the paired `.txt` label. `save_frame()` and `write_yolo_labels()` are two separate, non-atomic writes; a Kaggle timeout/OOM between them left an image with no label, and the next call would see the `.jpg` and skip that stem forever — `MosaicDataset` treats a missing label file as "zero objects," so this would silently mistrain Module A on a false-negative frame. Fixed to require both files present before treating a stem as done.
+
+**`ImageFolder` hardened against non-class directories** (`module_b_classifier.py`, new `_REATSImageFolder`): the subtree-relocation fix (previous section below) stopped `run_detection()` specifically from writing into `data/{split}/` directly, but `build_loaders()`'s plain `ImageFolder` still had no defense against *any other* future writer doing the same and reproducing the identical crash — it treats every subdirectory as a class with no filter. Added a small `ImageFolder` subclass overriding `find_classes()` to only accept directories whose name is an actual REATS class (`config.CLASSES`); a stray non-class directory is now ignored rather than crashing or silently becoming a bogus 44th class. This is the deeper fix the altitude-angle reviewer asked for — defense in depth, not reliant on every future ingestion path remembering the convention.
+
+**Redundant dataset re-parse eliminated**: `run_detection()` called `self._collect_by_class()` independently of `run()`, so the notebook's back-to-back `c-ingest` + `c-ingest-detection` cells (same `pipe` object) re-parsed every attached dataset's COCO/XML/YOLO annotations and re-ran label resolution twice for identical output — roughly doubling ingestion wall time with 21 datasets attached. Fixed by caching `_collect_by_class()`'s result on the `IngestPipeline` instance (safe: `self.datasets` is fixed for the instance's lifetime, no setter exists to invalidate it).
+
+Verified: `py_compile` on all touched files, plus standalone pure-Python reimplementations (no cv2/numpy/torch/torchvision in this dev sandbox) of the stem-collision fix, the orphan self-healing, the `find_classes()` filtering, and the caching behavior — all pass. **Still not verified on a real Kaggle GPU run** — same caveat as everything else in this session's ingestion/training work.
+
+Findings surfaced but not acted on (lower priority — cosmetic/maintainability, not correctness): `run_detection()`'s unused `detection_root` parameter; duplicated print-banner formatting between `run()` and `run_detection()`; `_classifier_device()` re-deriving a value already available as `detector.device` at each of its 3 call sites; Module A's fast-mode epoch count (`c-train-detector`) as a standalone hardcoded ternary instead of going through `make_fast_config()` like Module B's does.
+
+---
+
 ## run_detection() broke Module B training — fixed (2026-07-08)
 
 The first real Kaggle run of the newly-added detection pipeline crashed `c-train-single` (Module B classification training, which runs *after* `c-ingest-detection` in cell order) with:

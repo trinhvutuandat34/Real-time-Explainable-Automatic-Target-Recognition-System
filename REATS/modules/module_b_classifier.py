@@ -263,6 +263,34 @@ def preprocess_roi(roi: np.ndarray, img_size: int = 224, device: str = "cpu") ->
 # Data loaders
 # ---------------------------------------------------------------------------
 
+class _REATSImageFolder(datasets.ImageFolder):
+    """ImageFolder restricted to REATS's known 43-class taxonomy.
+
+    Plain ImageFolder treats every subdirectory of root as a class with no
+    way to exclude one — a stray non-class directory under data/{split}/
+    either gets silently added as a bogus class, or (if it happens to
+    contain zero image-extension files) hard-crashes find_classes /
+    make_dataset entirely with "Found no valid file for the classes X".
+    This isn't hypothetical: ingestion/pipeline.py's run_detection() used
+    to write its YOLO-format images/+labels/ output directly under
+    data/{split}/ before being moved to its own data/detection/ subtree,
+    and "labels" containing only .txt files crashed exactly this way on a
+    real Kaggle run. Overriding find_classes() to only accept directories
+    that are actual REATS class names makes the loader robust to whatever
+    else ever ends up under data/{split}/, instead of relying on every
+    future writer to remember to avoid that directory.
+    """
+    def find_classes(self, directory: str) -> Tuple[List[str], Dict[str, int]]:
+        all_dirs = sorted(d.name for d in Path(directory).iterdir() if d.is_dir())
+        classes = [d for d in all_dirs if d in CLASSES]
+        if not classes:
+            raise FileNotFoundError(
+                f"No REATS class folders found in {directory} "
+                f"({len(all_dirs)} non-matching subdirectorie(s) present)."
+            )
+        return classes, {c: i for i, c in enumerate(classes)}
+
+
 def build_loaders(cfg: dict = CONFIG) -> Tuple[DataLoader, DataLoader, DataLoader]:
     base_tf = transforms.Compose([
         transforms.Resize((cfg["img_size"], cfg["img_size"])),
@@ -280,9 +308,9 @@ def build_loaders(cfg: dict = CONFIG) -> Tuple[DataLoader, DataLoader, DataLoade
                 pin_memory=torch.cuda.is_available(),
                 persistent_workers=num_workers > 0)
     return (
-        DataLoader(datasets.ImageFolder(root / "train", transform=base_tf), shuffle=True,  **kw),
-        DataLoader(datasets.ImageFolder(root / "val",   transform=base_tf), shuffle=False, **kw),
-        DataLoader(datasets.ImageFolder(root / "test",  transform=base_tf), shuffle=False, **kw),
+        DataLoader(_REATSImageFolder(root / "train", transform=base_tf), shuffle=True,  **kw),
+        DataLoader(_REATSImageFolder(root / "val",   transform=base_tf), shuffle=False, **kw),
+        DataLoader(_REATSImageFolder(root / "test",  transform=base_tf), shuffle=False, **kw),
     )
 
 
